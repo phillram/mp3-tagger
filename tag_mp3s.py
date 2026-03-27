@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-MP3 Metadata Tagger
-===================
-Scans a folder structure of Artist/[YEAR] Album/track.mp3 files,
+Audio Metadata Tagger
+=====================
+Scans a folder structure of Artist/[YEAR] Album/track files,
 looks up metadata from MusicBrainz + Cover Art Archive, and writes
-ID3v2.4 tags to each file.
+tags to MP3, FLAC, and M4A files.
 
 Usage:
     python3 tag_mp3s.py /path/to/music
     python3 tag_mp3s.py /path/to/music --dry-run
-    python3 tag_mp3s.py /path/to/music --no-art
-    python3 tag_mp3s.py /path/to/music --genre "Rock"
-    python3 tag_mp3s.py /path/to/music --rename
+    python3 tag_mp3s.py /path/to/music --confirm
+    python3 tag_mp3s.py /path/to/music --filter "Radiohead"
+    python3 tag_mp3s.py /path/to/music --rename --skip-tagged
     python3 tag_mp3s.py /path/to/music --output report.csv
 
 Requirements:
@@ -22,13 +22,10 @@ import argparse
 import csv
 import os
 import re
-import shutil
 import sys
 import time
-import json
 import urllib.request
 import urllib.error
-from datetime import datetime
 from pathlib import Path
 
 try:
@@ -53,6 +50,15 @@ mb.set_useragent("MP3Tagger", "1.0", "https://github.com/example/mp3tagger")
 # Rate limiting: MusicBrainz allows 1 request/sec
 _last_mb_request = 0.0
 
+# Common album name suffixes to strip for fuzzy matching
+_ALBUM_SUFFIXES = re.compile(
+    r'\s*[\(\[](deluxe|special|remaster(ed)?|expanded|anniversary|bonus tracks?|'
+    r'limited|collector.s?|standard|explicit|clean|mono|stereo|'
+    r'\d+th anniversary|re-?issue|redux|super deluxe|platinum|gold)'
+    r'(\s+edition)?[\)\]]\s*$',
+    re.IGNORECASE
+)
+
 
 def _rate_limit():
     global _last_mb_request
@@ -61,6 +67,28 @@ def _rate_limit():
     if elapsed < 1.1:
         time.sleep(1.1 - elapsed)
     _last_mb_request = time.time()
+
+
+def _mb_api_call(func, *args, retries: int = 2, **kwargs):
+    """Call a MusicBrainz API function with rate limiting and retry on transient errors."""
+    for attempt in range(retries + 1):
+        _rate_limit()
+        try:
+            return func(*args, **kwargs)
+        except mb.WebServiceError as e:
+            if attempt < retries and _is_transient_error(e):
+                wait = 2 ** attempt
+                print(f"  Retrying MusicBrainz request in {wait}s (attempt {attempt + 1})...")
+                time.sleep(wait)
+                continue
+            raise
+
+
+def _is_transient_error(e: Exception) -> bool:
+    """Check if a MusicBrainz error is transient (worth retrying)."""
+    msg = str(e).lower()
+    return any(hint in msg for hint in ['503', '429', 'timeout', 'timed out', 'rate limit',
+                                         'service unavailable', 'connection'])
 
 
 def normalize_hyphens(text: str) -> str:
@@ -172,15 +200,23 @@ def rename_album_folder(album_dir: Path, year: str, album_name: str,
 
 
 def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool, log: list):
-    """Rename track files to 'NN - Track Title.mp3' format using MusicBrainz data."""
-    mp3_files = sorted(album_dir.glob('*.mp3'), key=lambda p: p.name)
-    for mp3_path in mp3_files:
+    """Rename track files to 'NN - Track Title.ext' format using MusicBrainz data."""
+    audio_files = find_audio_files(album_dir)
+    for mp3_path in audio_files:
         file_track_num, file_title = parse_track_filename(mp3_path.name)
         if not file_track_num or not track_map:
             continue
 
+        # Infer disc number from subfolder name (CD1, Disc 2, etc.)
+        disc_match = re.match(r'(?:cd|disc|disk)\s*(\d+)', mp3_path.parent.name, re.IGNORECASE)
+        inferred_disc = int(disc_match.group(1)) if disc_match else None
+
         # Find matching track info
-        track_info = track_map.get((1, file_track_num))
+        track_info = None
+        if inferred_disc:
+            track_info = track_map.get((inferred_disc, file_track_num))
+        if not track_info:
+            track_info = track_map.get((1, file_track_num))
         if not track_info:
             for key, val in track_map.items():
                 if key[1] == file_track_num:
@@ -193,12 +229,14 @@ def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool, log: lis
         mb_title = track_info['title']
         track_num = track_info['track_num']
         safe_title = sanitize_filename(mb_title)
-        new_name = f"{track_num:02d} - {safe_title}.mp3"
+        ext = mp3_path.suffix
+        new_name = f"{track_num:02d} - {safe_title}{ext}"
 
         if mp3_path.name == new_name:
             continue
 
-        new_path = album_dir / new_name
+        # Rename in the file's own directory (may be a disc subfolder)
+        new_path = mp3_path.parent / new_name
         if new_path.exists() and new_path != mp3_path:
             print(f"  WARNING: Cannot rename '{mp3_path.name}' -> '{new_name}' (target exists)")
             log.append({
@@ -229,6 +267,49 @@ def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool, log: lis
             })
 
 
+def _file_has_cover_art(filepath: str) -> bool:
+    """Check if a file already has embedded cover art."""
+    ext = Path(filepath).suffix.lower()
+    try:
+        if ext == '.mp3':
+            tags = ID3(filepath)
+            return bool(tags.getall('APIC'))
+        elif ext == '.flac':
+            from mutagen.flac import FLAC
+            audio = FLAC(filepath)
+            return bool(audio.pictures)
+        elif ext in ('.m4a', '.mp4', '.aac'):
+            from mutagen.mp4 import MP4
+            audio = MP4(filepath)
+            return bool(audio.tags and audio.tags.get('covr'))
+    except Exception:
+        return False
+    return False
+
+
+def has_complete_tags(filepath: str) -> bool:
+    """Check if a file already has a reasonably complete set of tags."""
+    ext = Path(filepath).suffix.lower()
+    try:
+        if ext == '.mp3':
+            tags = ID3(filepath)
+            required = ['TIT2', 'TPE1', 'TALB', 'TRCK', 'TDRC']
+            return all(tags.getall(frame) for frame in required)
+        elif ext == '.flac':
+            from mutagen.flac import FLAC
+            audio = FLAC(filepath)
+            required = ['title', 'artist', 'album', 'tracknumber', 'date']
+            return all(audio.get(tag) for tag in required)
+        elif ext in ('.m4a', '.mp4', '.aac'):
+            from mutagen.mp4 import MP4
+            audio = MP4(filepath)
+            required = ['\xa9nam', '\xa9ART', '\xa9alb', 'trkn', '\xa9day']
+            return all(audio.tags and audio.tags.get(tag) for tag in required)
+    except Exception:
+        return False
+    return False
+
+
 def parse_track_filename(filename: str) -> tuple[int | None, str]:
     """Extract track number and title from filename. Returns (track_num, title)."""
     name = Path(filename).stem
@@ -245,31 +326,57 @@ def parse_track_filename(filename: str) -> tuple[int | None, str]:
     return None, name
 
 
-def search_release(artist: str, album: str, year: str | None = None) -> dict | None:
-    """Search MusicBrainz for a release and return full metadata."""
-    _rate_limit()
+def _search_mb_releases(artist: str, album: str, year: str | None = None) -> list:
+    """Search MusicBrainz with progressive fallback: exact -> no year -> stripped suffixes."""
+    searches = []
 
+    # 1. Exact query (with year if available)
     query = f'artist:"{artist}" AND release:"{album}"'
     if year:
         query += f' AND date:{year}'
+    searches.append(query)
 
-    try:
-        results = mb.search_releases(query=query, limit=5)
-    except mb.WebServiceError as e:
-        print(f"  WARNING: MusicBrainz search failed: {e}")
-        return None
+    # 2. Without year
+    if year:
+        searches.append(f'artist:"{artist}" AND release:"{album}"')
 
-    if not results.get('release-list'):
-        # Try without year
-        if year:
-            _rate_limit()
-            query = f'artist:"{artist}" AND release:"{album}"'
-            try:
-                results = mb.search_releases(query=query, limit=5)
-            except mb.WebServiceError:
-                return None
+    # 3. With common suffixes stripped (fuzzy)
+    stripped = _ALBUM_SUFFIXES.sub('', album).strip()
+    if stripped != album:
+        searches.append(f'artist:"{artist}" AND release:"{stripped}"')
 
-    releases = results.get('release-list', [])
+    for query in searches:
+        try:
+            results = _mb_api_call(mb.search_releases, query=query, limit=5)
+            releases = results.get('release-list', [])
+            if releases:
+                return releases
+        except mb.WebServiceError as e:
+            print(f"  WARNING: MusicBrainz search failed: {e}")
+            return []
+
+    return []
+
+
+def get_canonical_artist_name(release: dict) -> str | None:
+    """Extract the canonical artist name from a MusicBrainz release."""
+    credit = release.get('artist-credit', [])
+    if credit:
+        # artist-credit can be a list of dicts with 'artist' key
+        if isinstance(credit, list) and credit:
+            artist_entry = credit[0]
+            if isinstance(artist_entry, dict):
+                artist_obj = artist_entry.get('artist', {})
+                return artist_obj.get('name')
+            # Sometimes it's a plain string
+            if isinstance(artist_entry, str):
+                return artist_entry
+    return None
+
+
+def search_release(artist: str, album: str, year: str | None = None) -> dict | None:
+    """Search MusicBrainz for a release and return full metadata."""
+    releases = _search_mb_releases(artist, album, year)
     if not releases:
         return None
 
@@ -278,9 +385,9 @@ def search_release(artist: str, album: str, year: str | None = None) -> dict | N
     release_id = release['id']
 
     # Fetch full release details including recordings
-    _rate_limit()
     try:
-        full = mb.get_release_by_id(
+        full = _mb_api_call(
+            mb.get_release_by_id,
             release_id,
             includes=['recordings', 'artist-credits', 'labels', 'release-groups']
         )
@@ -298,9 +405,8 @@ def get_release_group_info(release: dict) -> dict:
     if rg:
         rg_id = rg.get('id')
         if rg_id:
-            _rate_limit()
             try:
-                rg_full = mb.get_release_group_by_id(rg_id, includes=['tags'])
+                rg_full = _mb_api_call(mb.get_release_group_by_id, rg_id, includes=['tags'])
                 rg_data = rg_full.get('release-group', rg_full)
                 tags = rg_data.get('tag-list', [])
                 if tags:
@@ -312,15 +418,21 @@ def get_release_group_info(release: dict) -> dict:
     return info
 
 
-def fetch_cover_art(release_id: str) -> bytes | None:
-    """Fetch front cover art from the Cover Art Archive."""
+def fetch_cover_art(release_id: str, retries: int = 2) -> bytes | None:
+    """Fetch front cover art from the Cover Art Archive with retry."""
     url = f"https://coverartarchive.org/release/{release_id}/front-500"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'MP3Tagger/1.0'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read()
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-        pass
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'MP3Tagger/1.0'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.read()
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+            # Don't retry on 404 (no art exists)
+            if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+                break
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+                continue
     return None
 
 
@@ -356,7 +468,7 @@ def apply_tags(
     dry_run: bool = False,
     strip_comments: bool = False,
 ) -> dict:
-    """Apply ID3v2.4 tags to an MP3 file. Returns a summary of changes."""
+    """Apply tags to an audio file (MP3/FLAC/M4A). Returns a summary of changes."""
     changes = {}
 
     # Parse what we can from the filename as fallback
@@ -379,8 +491,10 @@ def apply_tags(
     changes['has_cover'] = cover_art is not None
     changes['comments_removed'] = False
 
-    # Check for existing comments before any modifications
-    if strip_comments:
+    ext = Path(filepath).suffix.lower()
+
+    # Check for existing comments before any modifications (MP3 only)
+    if strip_comments and ext == '.mp3':
         try:
             existing_tags = ID3(filepath)
             comm_frames = existing_tags.getall('COMM')
@@ -395,86 +509,170 @@ def apply_tags(
     if dry_run:
         return changes
 
-    # Load or create ID3 tags
+    if ext == '.mp3':
+        _apply_mp3_tags(filepath, artist, album, year, title, track_num,
+                        total_tracks, disc_num, total_discs, genre, label,
+                        cover_art, strip_comments)
+    elif ext == '.flac':
+        _apply_flac_tags(filepath, artist, album, year, title, track_num,
+                         total_tracks, disc_num, total_discs, genre, label,
+                         cover_art)
+    elif ext in ('.m4a', '.mp4', '.aac'):
+        _apply_m4a_tags(filepath, artist, album, year, title, track_num,
+                        total_tracks, disc_num, total_discs, genre, cover_art)
+
+    return changes
+
+
+def _apply_mp3_tags(filepath, artist, album, year, title, track_num,
+                    total_tracks, disc_num, total_discs, genre, label,
+                    cover_art, strip_comments):
+    """Apply ID3v2.4 tags to an MP3 file."""
     try:
         tags = ID3(filepath)
     except ID3NoHeaderError:
         tags = ID3()
 
-    # Song title
     tags.delall('TIT2')
     tags.add(TIT2(encoding=3, text=[title]))
-
-    # Artist
     tags.delall('TPE1')
     tags.add(TPE1(encoding=3, text=[artist]))
-
-    # Album artist
     tags.delall('TPE2')
     tags.add(TPE2(encoding=3, text=[artist]))
-
-    # Album
     tags.delall('TALB')
     tags.add(TALB(encoding=3, text=[album]))
 
-    # Track number
     if track_num:
         tags.delall('TRCK')
         track_str = f"{track_num}/{total_tracks}" if total_tracks else str(track_num)
         tags.add(TRCK(encoding=3, text=[track_str]))
 
-    # Disc number
     tags.delall('TPOS')
     disc_str = f"{disc_num}/{total_discs}" if total_discs else str(disc_num)
     tags.add(TPOS(encoding=3, text=[disc_str]))
 
-    # Release date/year
     if year:
         tags.delall('TDRC')
         tags.add(TDRC(encoding=3, text=[year]))
-
-    # Genre
     if genre:
         tags.delall('TCON')
         tags.add(TCON(encoding=3, text=[genre]))
-
-    # Label/publisher
     if label:
         tags.delall('TPUB')
         tags.add(TPUB(encoding=3, text=[label]))
 
-    # Album cover art
     if cover_art:
         tags.delall('APIC')
-        tags.add(APIC(
-            encoding=3,
-            mime='image/jpeg',
-            type=3,  # Cover (front)
-            desc='Front Cover',
-            data=cover_art,
-        ))
+        tags.add(APIC(encoding=3, mime='image/jpeg', type=3,
+                       desc='Front Cover', data=cover_art))
 
-    # Strip comments
     if strip_comments:
         tags.delall('COMM')
 
     tags.save(filepath, v2_version=4)
-    return changes
+
+
+def _apply_flac_tags(filepath, artist, album, year, title, track_num,
+                     total_tracks, disc_num, total_discs, genre, label,
+                     cover_art):
+    """Apply Vorbis comments to a FLAC file."""
+    from mutagen.flac import FLAC, Picture
+
+    audio = FLAC(filepath)
+    audio['title'] = title
+    audio['artist'] = artist
+    audio['albumartist'] = artist
+    audio['album'] = album
+
+    if track_num:
+        audio['tracknumber'] = str(track_num)
+        if total_tracks:
+            audio['tracktotal'] = str(total_tracks)
+
+    audio['discnumber'] = str(disc_num)
+    if total_discs:
+        audio['disctotal'] = str(total_discs)
+
+    if year:
+        audio['date'] = year
+    if genre:
+        audio['genre'] = genre
+    if label:
+        audio['organization'] = label
+
+    if cover_art:
+        audio.clear_pictures()
+        pic = Picture()
+        pic.type = 3  # Cover (front)
+        pic.mime = 'image/jpeg'
+        pic.desc = 'Front Cover'
+        pic.data = cover_art
+        audio.add_picture(pic)
+
+    audio.save()
+
+
+def _apply_m4a_tags(filepath, artist, album, year, title, track_num,
+                    total_tracks, disc_num, total_discs, genre, cover_art):
+    """Apply MP4/M4A tags."""
+    from mutagen.mp4 import MP4, MP4Cover
+
+    audio = MP4(filepath)
+    if audio.tags is None:
+        audio.add_tags()
+
+    audio.tags['\xa9nam'] = [title]
+    audio.tags['\xa9ART'] = [artist]
+    audio.tags['aART'] = [artist]
+    audio.tags['\xa9alb'] = [album]
+
+    if track_num:
+        audio.tags['trkn'] = [(track_num, total_tracks or 0)]
+    audio.tags['disk'] = [(disc_num, total_discs or 0)]
+
+    if year:
+        audio.tags['\xa9day'] = [year]
+    if genre:
+        audio.tags['\xa9gen'] = [genre]
+
+    if cover_art:
+        audio.tags['covr'] = [MP4Cover(cover_art, imageformat=MP4Cover.FORMAT_JPEG)]
+
+    audio.save()
+
+
+AUDIO_EXTENSIONS = {'.mp3', '.flac', '.m4a', '.mp4', '.aac'}
+
+
+def find_audio_files(directory: Path) -> list[Path]:
+    """Find all supported audio files in a directory, including multi-disc subfolders."""
+    files = []
+    for ext in AUDIO_EXTENSIONS:
+        files.extend(directory.glob(f'*{ext}'))
+
+    # Check for multi-disc subfolders: CD1, CD2, Disc 1, Disc 2, etc.
+    disc_pattern = re.compile(r'^(cd|disc|disk)\s*\d+$', re.IGNORECASE)
+    for subdir in sorted(directory.iterdir()):
+        if subdir.is_dir() and disc_pattern.match(subdir.name):
+            for ext in AUDIO_EXTENSIONS:
+                files.extend(subdir.glob(f'*{ext}'))
+
+    return sorted(files, key=lambda p: (p.parent.name, p.name))
 
 
 def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                   dry_run: bool, skip_art: bool, rename: bool, strip_comments: bool,
-                  log: list) -> int:
-    """Process all MP3s in an album directory. Returns count of files processed."""
+                  log: list, skip_tagged: bool = False, keep_art: bool = False) -> int:
+    """Process all audio files in an album directory. Returns count of files processed."""
     folder_name = album_dir.name
     year, album_name = parse_album_folder(folder_name)
 
-    mp3_files = sorted(album_dir.glob('*.mp3'), key=lambda p: p.name)
+    mp3_files = find_audio_files(album_dir)
     if not mp3_files:
         return 0
 
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Processing: {artist_name} - {album_name} ({year or 'unknown year'})")
-    print(f"  Found {len(mp3_files)} MP3 file(s)")
+    print(f"  Found {len(mp3_files)} audio file(s)")
 
     # Look up on MusicBrainz
     release = search_release(artist_name, album_name, year)
@@ -486,6 +684,12 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     if release:
         print(f"  MusicBrainz match: {release.get('title', '?')} (id: {release.get('id', '?')[:8]}...)")
         track_map = build_track_list(release)
+
+        # Correct artist name from MusicBrainz canonical spelling
+        canonical_artist = get_canonical_artist_name(release)
+        if canonical_artist and canonical_artist != artist_name:
+            print(f"  Artist correction: '{artist_name}' -> '{canonical_artist}'")
+            artist_name = canonical_artist
 
         # Get genre from release group tags
         if not genre:
@@ -519,31 +723,51 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     # Rename album folder to [YEAR] Album Name format
     if rename and year:
         album_dir = rename_album_folder(album_dir, year, mb_album_name, dry_run, log)
-        # Re-scan mp3 files after potential rename
+        # Re-scan files after potential rename
         if not dry_run:
-            mp3_files = sorted(album_dir.glob('*.mp3'), key=lambda p: p.name)
+            mp3_files = find_audio_files(album_dir)
 
-    # Rename track files to "NN - Title.mp3" format
+    # Rename track files to "NN - Title.ext" format
     if rename and track_map:
         rename_track_files(album_dir, track_map, dry_run, log)
         # Re-scan after potential renames
         if not dry_run:
-            mp3_files = sorted(album_dir.glob('*.mp3'), key=lambda p: p.name)
+            mp3_files = find_audio_files(album_dir)
 
     count = 0
+    skipped_tagged = 0
     for mp3_path in mp3_files:
+        # Skip already-tagged files if requested
+        if skip_tagged and has_complete_tags(str(mp3_path)):
+            skipped_tagged += 1
+            continue
+
         file_track_num, file_title = parse_track_filename(mp3_path.name)
 
-        # Try to match to MusicBrainz track data
+        # Try to match to MusicBrainz track data — use disc subfolder to infer disc number
         track_info = None
+        inferred_disc = None
+        disc_match = re.match(r'(?:cd|disc|disk)\s*(\d+)', mp3_path.parent.name, re.IGNORECASE)
+        if disc_match:
+            inferred_disc = int(disc_match.group(1))
+
         if track_map and file_track_num:
-            # Try disc 1 first, then search all discs
-            track_info = track_map.get((1, file_track_num))
+            if inferred_disc:
+                track_info = track_map.get((inferred_disc, file_track_num))
+            if not track_info:
+                track_info = track_map.get((1, file_track_num))
             if not track_info:
                 for key, val in track_map.items():
                     if key[1] == file_track_num:
                         track_info = val
                         break
+
+        # Determine cover art for this file
+        file_cover_art = cover_art
+        if keep_art and cover_art:
+            # Preserve existing art if the file already has embedded art
+            if _file_has_cover_art(str(mp3_path)):
+                file_cover_art = None
 
         changes = apply_tags(
             filepath=str(mp3_path),
@@ -553,7 +777,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
             track_info=track_info,
             genre=genre,
             label=label,
-            cover_art=cover_art,
+            cover_art=file_cover_art,
             dry_run=dry_run,
             strip_comments=strip_comments,
         )
@@ -582,17 +806,40 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         })
         count += 1
 
+    if skipped_tagged:
+        print(f"  Skipped {skipped_tagged} already-tagged file(s)")
+
     return count
 
 
 def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_art: bool,
                      rename: bool = False, strip_comments: bool = False,
-                     output_file: str | None = None):
+                     output_file: str | None = None, filter_str: str | None = None,
+                     skip_tagged: bool = False, keep_art: bool = False,
+                     confirm: bool = False):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
         print(f"ERROR: '{root}' is not a directory")
         sys.exit(1)
+
+    # --confirm mode: run a dry-run preview first, then ask before applying
+    if confirm and not dry_run:
+        print("PREVIEW MODE — showing what would be changed...\n")
+        scan_and_process(root, genre_override, dry_run=True, skip_art=skip_art,
+                         rename=rename, strip_comments=strip_comments,
+                         output_file=None, filter_str=filter_str,
+                         skip_tagged=skip_tagged, keep_art=keep_art, confirm=False)
+        print()
+        try:
+            answer = input("Apply these changes? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            return
+        if answer not in ('y', 'yes'):
+            print("Aborted — no changes were made.")
+            return
+        print()
 
     print(f"Scanning: {root_path}")
     if dry_run:
@@ -600,42 +847,54 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
 
     log: list[dict] = []
     total = 0
+    stats = {'artists': 0, 'albums': 0, 'files': 0, 'mb_matched': 0, 'mb_unmatched': 0,
+             'skipped': 0, 'renamed_folders': 0, 'renamed_files': 0}
     artist_dirs = sorted([d for d in root_path.iterdir() if d.is_dir()])
 
     if not artist_dirs:
         print("No artist directories found.")
         return
 
-    # Check if the root itself looks like an artist folder (contains album folders with MP3s)
-    has_mp3_in_subdirs = False
+    # Check if the root itself looks like an artist folder (contains audio files in subdirs)
+    has_audio_in_subdirs = False
     for d in artist_dirs:
-        if list(d.glob('*.mp3')):
-            has_mp3_in_subdirs = True
+        if find_audio_files(d):
+            has_audio_in_subdirs = True
             break
 
-    if has_mp3_in_subdirs:
+    if has_audio_in_subdirs:
         print(f"NOTE: It looks like '{root_path.name}' might be an artist folder.")
         print("       Expected structure: ArtistName/[Year] Album/tracks.mp3")
         print("       If results look wrong, pass the parent directory instead.\n")
+
+    # Apply filter
+    filter_lower = filter_str.lower() if filter_str else None
 
     for artist_dir in artist_dirs:
         if not artist_dir.is_dir():
             continue
 
         artist_name = artist_dir.name
+
+        # Filter by artist name
+        if filter_lower and filter_lower not in artist_name.lower():
+            continue
+
         album_dirs = sorted([d for d in artist_dir.iterdir() if d.is_dir()])
 
-        # If this artist folder itself contains mp3s (flat structure), skip with warning
-        direct_mp3s = list(artist_dir.glob('*.mp3'))
-        if direct_mp3s and not album_dirs:
-            print(f"\n  WARNING: MP3s found directly in '{artist_name}/' — skipping.")
+        # If this artist folder itself contains audio files (flat structure), skip with warning
+        direct_audio = [f for f in artist_dir.iterdir()
+                        if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS]
+        if direct_audio and not album_dirs:
+            print(f"\n  WARNING: Audio files found directly in '{artist_name}/' — skipping.")
             print(f"           Expected: {artist_name}/[YEAR] Album Name/track.mp3")
-            for mp3_path in direct_mp3s:
+            for audio_path in direct_audio:
+                stats['skipped'] += 1
                 log.append({
                     'type': 'file',
                     'status': 'skipped',
-                    'reason': 'MP3 found directly in artist folder (no album subfolder)',
-                    'previous_path': str(mp3_path),
+                    'reason': 'Audio file found directly in artist folder (no album subfolder)',
+                    'previous_path': str(audio_path),
                     'new_path': '',
                     'artist': artist_name,
                     'album': '',
@@ -648,14 +907,54 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                 })
             continue
 
+        stats['artists'] += 1
+
         for album_dir in album_dirs:
             if not album_dir.is_dir():
                 continue
+
+            # Filter by album name too if filter doesn't match artist
+            if filter_lower and filter_lower not in artist_name.lower():
+                _, album_name = parse_album_folder(album_dir.name)
+                if filter_lower not in album_name.lower():
+                    continue
+
+            stats['albums'] += 1
             count = process_album(artist_name, album_dir, genre_override, dry_run,
-                                  skip_art, rename, strip_comments, log)
+                                  skip_art, rename, strip_comments, log,
+                                  skip_tagged=skip_tagged, keep_art=keep_art)
+            stats['files'] += count
             total += count
 
-    print(f"\n{'[DRY RUN] ' if dry_run else ''}Done! Processed {total} file(s).")
+    # Count stats from log
+    for entry in log:
+        if entry.get('mb_matched') == 'True':
+            stats['mb_matched'] += 1
+        elif entry.get('mb_matched') == 'False':
+            stats['mb_unmatched'] += 1
+        if entry.get('status') in ('renamed', 'would_rename'):
+            if entry.get('type') == 'folder':
+                stats['renamed_folders'] += 1
+            else:
+                stats['renamed_files'] += 1
+        if entry.get('status') == 'skipped':
+            stats['skipped'] += 1
+
+    # Print summary
+    prefix = "[DRY RUN] " if dry_run else ""
+    print(f"\n{prefix}{'=' * 40}")
+    print(f"{prefix}Summary:")
+    print(f"{prefix}  Artists processed:   {stats['artists']}")
+    print(f"{prefix}  Albums processed:    {stats['albums']}")
+    print(f"{prefix}  Files tagged:        {stats['files']}")
+    print(f"{prefix}  MusicBrainz matched: {stats['mb_matched']}")
+    print(f"{prefix}  MusicBrainz missed:  {stats['mb_unmatched']}")
+    if stats['renamed_folders'] or stats['renamed_files']:
+        print(f"{prefix}  Folders renamed:     {stats['renamed_folders']}")
+        print(f"{prefix}  Files renamed:       {stats['renamed_files']}")
+    if stats['skipped']:
+        print(f"{prefix}  Skipped:             {stats['skipped']}")
+    print(f"{prefix}{'=' * 40}")
 
     # Write output report
     if output_file:
@@ -690,7 +989,7 @@ def write_output_report(output_file: str, log: list[dict], dry_run: bool):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Tag MP3 files with metadata from MusicBrainz',
+        description='Tag audio files (MP3/FLAC/M4A) with metadata from MusicBrainz',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Expected folder structure:
@@ -698,17 +997,26 @@ Expected folder structure:
     Artist Name/
       [2024] Album Name/
         01 - Track One.mp3
-        02 - Track Two.mp3
+        02 - Track Two.flac
       [2020] Another Album/
-        01. First Song.mp3
+        CD1/
+          01. First Song.mp3
+        CD2/
+          01. Bonus Track.mp3
+
+Supported formats: MP3, FLAC, M4A/MP4/AAC
 
 Examples:
   %(prog)s /path/to/music --dry-run              # preview changes
   %(prog)s /path/to/music                        # apply tags
+  %(prog)s /path/to/music --confirm              # preview then ask before applying
   %(prog)s /path/to/music --genre Rock           # force genre
   %(prog)s /path/to/music --no-art               # skip album art
+  %(prog)s /path/to/music --keep-art             # don't overwrite existing art
   %(prog)s /path/to/music --rename               # also fix folder/file names
   %(prog)s /path/to/music --rename --dry-run     # preview renames
+  %(prog)s /path/to/music --skip-tagged          # skip already-tagged files
+  %(prog)s /path/to/music --filter "Radiohead"   # process one artist only
   %(prog)s /path/to/music --strip-comments       # remove ID3 comments
   %(prog)s /path/to/music --output report.csv    # generate output report
         """
@@ -716,13 +1024,24 @@ Examples:
     parser.add_argument('directory', help='Root music directory to scan')
     parser.add_argument('--dry-run', action='store_true',
                         help='Preview changes without modifying files')
+    parser.add_argument('--confirm', action='store_true',
+                        help='Show a preview of changes and ask for confirmation before applying')
     parser.add_argument('--genre', type=str, default=None,
                         help='Override genre for all albums (e.g., "Rock", "Hip-Hop")')
     parser.add_argument('--no-art', action='store_true',
                         help='Skip fetching album cover art')
+    parser.add_argument('--keep-art', action='store_true',
+                        help='Preserve existing embedded cover art (don\'t overwrite)')
     parser.add_argument('--rename', action='store_true',
                         help='Rename album folders to [YEAR] Album Name format and '
-                             'track files to "NN - Title.mp3" using MusicBrainz data')
+                             'track files to "NN - Title.ext" using MusicBrainz data')
+    parser.add_argument('--skip-tagged', action='store_true',
+                        help='Skip files that already have complete tags '
+                             '(title, artist, album, track number, year)')
+    parser.add_argument('--filter', type=str, default=None, metavar='TEXT',
+                        dest='filter_str',
+                        help='Only process artists/albums matching this text '
+                             '(case-insensitive substring match)')
     parser.add_argument('--strip-comments', action='store_true',
                         help='Remove all comment (COMM) frames from MP3 ID3 tags')
     parser.add_argument('--output', type=str, default=None, metavar='FILE',
@@ -730,8 +1049,13 @@ Examples:
                              'new paths, skipped files)')
 
     args = parser.parse_args()
-    scan_and_process(args.directory, args.genre, args.dry_run, args.no_art,
-                     args.rename, args.strip_comments, args.output)
+    scan_and_process(
+        args.directory, args.genre, args.dry_run, args.no_art,
+        rename=args.rename, strip_comments=args.strip_comments,
+        output_file=args.output, filter_str=args.filter_str,
+        skip_tagged=args.skip_tagged, keep_art=args.keep_art,
+        confirm=args.confirm,
+    )
 
 
 if __name__ == '__main__':
