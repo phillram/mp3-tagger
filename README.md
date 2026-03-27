@@ -51,11 +51,20 @@ The script expects your music to be organised as:
 
 **Artist folders** should be named exactly as the artist appears on MusicBrainz (e.g. `Radiohead`, `Kendrick Lamar`).
 
-**Album folders** are parsed flexibly — the following formats are all understood:
-- `[2024] Album Name` (preferred)
+**Album folders** are parsed flexibly — all of the following formats are understood and will be correctly renamed to `[YEAR] Album Name` when using `--rename`:
+
+Year at the start:
+- `[2024] Album Name` (preferred/target format)
 - `(2024) Album Name`
 - `2024 - Album Name`
 - `2024 Album Name`
+
+Year at the end:
+- `Album Name (2024)`
+- `Album Name [2024]`
+- `Album Name - 2024`
+
+No year:
 - `Album Name` (year will be looked up from MusicBrainz)
 
 **Track filenames** are parsed for the track number. These formats work:

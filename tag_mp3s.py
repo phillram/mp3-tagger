@@ -77,22 +77,44 @@ def sanitize_filename(name: str) -> str:
 
 
 def parse_album_folder(folder_name: str) -> tuple[str | None, str | None]:
-    """Parse '[YEAR] Album Name' folder format. Returns (year, album_name)."""
-    # Match [2024] Album Name or (2024) Album Name
+    """Parse album folder name in various formats. Returns (year, album_name).
+
+    Supported formats:
+        [2024] Album Name
+        (2024) Album Name
+        2024 - Album Name
+        2024 Album Name
+        Album Name (2024)
+        Album Name [2024]
+        Album Name - 2024
+        Album Name
+    """
+    # Year at start in brackets: [2024] Album Name or (2024) Album Name
     m = re.match(r'[\[\(](\d{4})[\]\)]\s+(.+)', folder_name)
     if m:
         return m.group(1), m.group(2).strip()
 
-    # Also try: 2024 - Album Name (with any dash type)
+    # Year at start with dash: 2024 - Album Name (any dash type)
     m = re.match(r'(\d{4})\s*[-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]+\s*(.+)', folder_name)
     if m:
         return m.group(1), m.group(2).strip()
 
-    # Also try: 2024 Album Name (year at start)
+    # Year at start with space: 2024 Album Name
     m = re.match(r'(\d{4})\s+(.+)', folder_name)
     if m:
         return m.group(1), m.group(2).strip()
 
+    # Year at end in brackets: Album Name (2024) or Album Name [2024]
+    m = re.match(r'(.+?)\s*[\[\(](\d{4})[\]\)]\s*$', folder_name)
+    if m:
+        return m.group(2), m.group(1).strip()
+
+    # Year at end with dash: Album Name - 2024 (any dash type)
+    m = re.match(r'(.+?)\s*[-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]+\s*(\d{4})\s*$', folder_name)
+    if m:
+        return m.group(2), m.group(1).strip()
+
+    # No year found — return the folder name as the album name
     return None, folder_name
 
 
