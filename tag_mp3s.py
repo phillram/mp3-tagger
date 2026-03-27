@@ -332,6 +332,7 @@ def apply_tags(
     label: str | None,
     cover_art: bytes | None,
     dry_run: bool = False,
+    strip_comments: bool = False,
 ) -> dict:
     """Apply ID3v2.4 tags to an MP3 file. Returns a summary of changes."""
     changes = {}
@@ -354,6 +355,20 @@ def apply_tags(
     changes['genre'] = genre
     changes['label'] = label
     changes['has_cover'] = cover_art is not None
+    changes['comments_removed'] = False
+
+    # Check for existing comments before any modifications
+    if strip_comments:
+        try:
+            existing_tags = ID3(filepath)
+            comm_frames = existing_tags.getall('COMM')
+            if comm_frames:
+                changes['comments_removed'] = True
+                changes['comments_found'] = '; '.join(
+                    str(f.text[0]) if f.text else f.desc for f in comm_frames
+                )
+        except ID3NoHeaderError:
+            pass
 
     if dry_run:
         return changes
@@ -417,12 +432,17 @@ def apply_tags(
             data=cover_art,
         ))
 
+    # Strip comments
+    if strip_comments:
+        tags.delall('COMM')
+
     tags.save(filepath, v2_version=4)
     return changes
 
 
 def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
-                  dry_run: bool, skip_art: bool, rename: bool, log: list) -> int:
+                  dry_run: bool, skip_art: bool, rename: bool, strip_comments: bool,
+                  log: list) -> int:
     """Process all MP3s in an album directory. Returns count of files processed."""
     folder_name = album_dir.name
     year, album_name = parse_album_folder(folder_name)
@@ -513,6 +533,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
             label=label,
             cover_art=cover_art,
             dry_run=dry_run,
+            strip_comments=strip_comments,
         )
 
         status = "WOULD TAG" if dry_run else "TAGGED"
@@ -520,7 +541,8 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         track = changes.get('track', '?')
         art_indicator = " [+art]" if changes.get('has_cover') else ""
         genre_str = f" [{changes.get('genre')}]" if changes.get('genre') else ""
-        print(f"  {status}: {track} - {title}{genre_str}{art_indicator}")
+        comment_indicator = " [-comments]" if changes.get('comments_removed') else ""
+        print(f"  {status}: {track} - {title}{genre_str}{art_indicator}{comment_indicator}")
 
         log.append({
             'type': 'file',
@@ -542,7 +564,8 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
 
 
 def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_art: bool,
-                     rename: bool = False, output_file: str | None = None):
+                     rename: bool = False, strip_comments: bool = False,
+                     output_file: str | None = None):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -607,7 +630,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
             if not album_dir.is_dir():
                 continue
             count = process_album(artist_name, album_dir, genre_override, dry_run,
-                                  skip_art, rename, log)
+                                  skip_art, rename, strip_comments, log)
             total += count
 
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Done! Processed {total} file(s).")
@@ -664,6 +687,7 @@ Examples:
   %(prog)s /path/to/music --no-art               # skip album art
   %(prog)s /path/to/music --rename               # also fix folder/file names
   %(prog)s /path/to/music --rename --dry-run     # preview renames
+  %(prog)s /path/to/music --strip-comments       # remove ID3 comments
   %(prog)s /path/to/music --output report.csv    # generate output report
         """
     )
@@ -677,13 +701,15 @@ Examples:
     parser.add_argument('--rename', action='store_true',
                         help='Rename album folders to [YEAR] Album Name format and '
                              'track files to "NN - Title.mp3" using MusicBrainz data')
+    parser.add_argument('--strip-comments', action='store_true',
+                        help='Remove all comment (COMM) frames from MP3 ID3 tags')
     parser.add_argument('--output', type=str, default=None, metavar='FILE',
                         help='Write a CSV report of all changes (previous paths, '
                              'new paths, skipped files)')
 
     args = parser.parse_args()
     scan_and_process(args.directory, args.genre, args.dry_run, args.no_art,
-                     args.rename, args.output)
+                     args.rename, args.strip_comments, args.output)
 
 
 if __name__ == '__main__':

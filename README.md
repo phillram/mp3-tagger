@@ -8,6 +8,7 @@ A Python script that automatically tags MP3 files with metadata from [MusicBrain
 - **Album cover art** — downloads front cover art from the Cover Art Archive and embeds it in each MP3
 - **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.mp3`
 - **Hyphen normalization** — automatically replaces en-dashes, em-dashes, and other Unicode dash characters with standard hyphens (`-`) in all renamed folders and filenames
+- **Strip comments** — optionally remove all comment (COMM) frames from ID3 tags, useful for cleaning out ripping software notes, encoder info, or other junk text
 - **Output report** — generate a CSV report of all changes: previous paths, new paths, tagged files, and any skipped files
 - **Dry-run mode** — preview all changes before anything is modified
 - **Genre override** — force a specific genre across all albums
@@ -104,6 +105,14 @@ python3 tag_mp3s.py /path/to/music --no-art
 
 Skips downloading and embedding cover art. Useful for faster runs or if you manage album art separately.
 
+### Strip comments
+
+```bash
+python3 tag_mp3s.py /path/to/music --strip-comments
+```
+
+Removes all comment (COMM) frames from the ID3 tags on each MP3. These often contain junk text left by ripping software, encoders, or download tools (e.g. "Ripped with EAC", "Downloaded from...", encoder settings). Works with `--dry-run` to preview which files have comments before removing them.
+
 ### Generate an output report
 
 ```bash
@@ -135,6 +144,7 @@ Works with all other flags including `--dry-run` (statuses will show `would_tag`
 ```bash
 python3 tag_mp3s.py /path/to/music --rename --genre "Electronic" --dry-run
 python3 tag_mp3s.py /path/to/music --rename --output report.csv
+python3 tag_mp3s.py /path/to/music --rename --strip-comments --output report.csv
 ```
 
 ## What Gets Tagged
