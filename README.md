@@ -7,6 +7,8 @@ A Python script that automatically tags MP3 files with metadata from [MusicBrain
 - **Automatic metadata lookup** — searches MusicBrainz by artist name and album to find verified track titles, disc numbers, genres, labels, and release dates
 - **Album cover art** — downloads front cover art from the Cover Art Archive and embeds it in each MP3
 - **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.mp3`
+- **Hyphen normalization** — automatically replaces en-dashes, em-dashes, and other Unicode dash characters with standard hyphens (`-`) in all renamed folders and filenames
+- **Output report** — generate a CSV report of all changes: previous paths, new paths, tagged files, and any skipped files
 - **Dry-run mode** — preview all changes before anything is modified
 - **Genre override** — force a specific genre across all albums
 - **ID3v2.4 tags** — writes modern ID3v2.4 tags compatible with all major music players
@@ -77,6 +79,7 @@ python3 tag_mp3s.py /path/to/music --rename
 This will:
 - Rename album folders to `[YEAR] Album Name` format using the canonical album title and year from MusicBrainz
 - Rename track files to `NN - Track Title.mp3` format using the verified track titles from MusicBrainz
+- Normalize all dashes to standard hyphens (`-`) — en-dashes (`–`), em-dashes (`—`), and other Unicode dash variants are replaced automatically
 - Also apply all metadata tags
 
 Use with `--dry-run` to preview renames first:
@@ -101,10 +104,37 @@ python3 tag_mp3s.py /path/to/music --no-art
 
 Skips downloading and embedding cover art. Useful for faster runs or if you manage album art separately.
 
+### Generate an output report
+
+```bash
+python3 tag_mp3s.py /path/to/music --output report.csv
+```
+
+Writes a CSV file with one row per action. Columns include:
+
+| Column | Description |
+|--------|-------------|
+| `type` | `file` or `folder` |
+| `status` | `tagged`, `renamed`, `skipped`, `would_tag`, `would_rename` |
+| `reason` | Why a file was skipped (empty if not skipped) |
+| `previous_path` | Original full path before any changes |
+| `new_path` | Path after rename (same as previous if not renamed) |
+| `artist` | Artist name applied |
+| `album` | Album name applied |
+| `title` | Track title applied |
+| `track` | Track number (e.g. `3/12`) |
+| `genre` | Genre applied |
+| `year` | Release year |
+| `has_cover` | Whether cover art was embedded |
+| `mb_matched` | Whether MusicBrainz found a match |
+
+Works with all other flags including `--dry-run` (statuses will show `would_tag`/`would_rename` instead).
+
 ### Combine options
 
 ```bash
 python3 tag_mp3s.py /path/to/music --rename --genre "Electronic" --dry-run
+python3 tag_mp3s.py /path/to/music --rename --output report.csv
 ```
 
 ## What Gets Tagged

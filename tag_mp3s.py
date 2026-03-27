@@ -10,13 +10,16 @@ Usage:
     python3 tag_mp3s.py /path/to/music
     python3 tag_mp3s.py /path/to/music --dry-run
     python3 tag_mp3s.py /path/to/music --no-art
-    python3 tag_mp3s.py /path/to/music --genre "Rock"   # override genre
+    python3 tag_mp3s.py /path/to/music --genre "Rock"
+    python3 tag_mp3s.py /path/to/music --rename
+    python3 tag_mp3s.py /path/to/music --output report.csv
 
 Requirements:
     pip3 install mutagen musicbrainzngs
 """
 
 import argparse
+import csv
 import os
 import re
 import shutil
@@ -25,6 +28,7 @@ import time
 import json
 import urllib.request
 import urllib.error
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -49,6 +53,7 @@ mb.set_useragent("MP3Tagger", "1.0", "https://github.com/example/mp3tagger")
 # Rate limiting: MusicBrainz allows 1 request/sec
 _last_mb_request = 0.0
 
+
 def _rate_limit():
     global _last_mb_request
     now = time.time()
@@ -58,6 +63,19 @@ def _rate_limit():
     _last_mb_request = time.time()
 
 
+def normalize_hyphens(text: str) -> str:
+    """Replace en-dashes, em-dashes, and other dash-like Unicode characters with a basic hyphen."""
+    # Covers: en-dash (–), em-dash (—), figure dash, horizontal bar, minus sign, etc.
+    return re.sub(r'[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\uFE58\uFE63\uFF0D]', '-', text)
+
+
+def sanitize_filename(name: str) -> str:
+    """Remove or replace characters that are unsafe for filesystems, and normalize hyphens."""
+    name = normalize_hyphens(name)
+    name = re.sub(r'[<>:"/\\|?*]', '_', name)
+    return name
+
+
 def parse_album_folder(folder_name: str) -> tuple[str | None, str | None]:
     """Parse '[YEAR] Album Name' folder format. Returns (year, album_name)."""
     # Match [2024] Album Name or (2024) Album Name
@@ -65,8 +83,8 @@ def parse_album_folder(folder_name: str) -> tuple[str | None, str | None]:
     if m:
         return m.group(1), m.group(2).strip()
 
-    # Also try: 2024 - Album Name
-    m = re.match(r'(\d{4})\s*[-–]\s*(.+)', folder_name)
+    # Also try: 2024 - Album Name (with any dash type)
+    m = re.match(r'(\d{4})\s*[-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]+\s*(.+)', folder_name)
     if m:
         return m.group(1), m.group(2).strip()
 
@@ -84,11 +102,13 @@ def is_correct_album_format(folder_name: str) -> bool:
 
 
 def build_album_folder_name(year: str, album_name: str) -> str:
-    """Build the canonical [YEAR] Album Name folder name."""
-    return f"[{year}] {album_name}"
+    """Build the canonical [YEAR] Album Name folder name with normalized hyphens."""
+    safe_name = sanitize_filename(album_name)
+    return f"[{year}] {safe_name}"
 
 
-def rename_album_folder(album_dir: Path, year: str, album_name: str, dry_run: bool) -> Path:
+def rename_album_folder(album_dir: Path, year: str, album_name: str,
+                        dry_run: bool, log: list) -> Path:
     """Rename an album folder to [YEAR] Album Name format. Returns the new path."""
     correct_name = build_album_folder_name(year, album_name)
     if album_dir.name == correct_name:
@@ -99,18 +119,37 @@ def rename_album_folder(album_dir: Path, year: str, album_name: str, dry_run: bo
     # Handle collision
     if new_path.exists() and new_path != album_dir:
         print(f"  WARNING: Cannot rename '{album_dir.name}' -> '{correct_name}' (target already exists)")
+        log.append({
+            'type': 'folder',
+            'status': 'skipped',
+            'reason': 'Target folder already exists',
+            'previous_path': str(album_dir),
+            'new_path': str(new_path),
+        })
         return album_dir
 
     if dry_run:
         print(f"  WOULD RENAME: '{album_dir.name}' -> '{correct_name}'")
+        log.append({
+            'type': 'folder',
+            'status': 'would_rename',
+            'previous_path': str(album_dir),
+            'new_path': str(new_path),
+        })
         return album_dir
     else:
         album_dir.rename(new_path)
         print(f"  RENAMED: '{album_dir.name}' -> '{correct_name}'")
+        log.append({
+            'type': 'folder',
+            'status': 'renamed',
+            'previous_path': str(album_dir),
+            'new_path': str(new_path),
+        })
         return new_path
 
 
-def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool):
+def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool, log: list):
     """Rename track files to 'NN - Track Title.mp3' format using MusicBrainz data."""
     mp3_files = sorted(album_dir.glob('*.mp3'), key=lambda p: p.name)
     for mp3_path in mp3_files:
@@ -131,8 +170,7 @@ def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool):
 
         mb_title = track_info['title']
         track_num = track_info['track_num']
-        # Sanitize title for filesystem
-        safe_title = re.sub(r'[<>:"/\\|?*]', '_', mb_title)
+        safe_title = sanitize_filename(mb_title)
         new_name = f"{track_num:02d} - {safe_title}.mp3"
 
         if mp3_path.name == new_name:
@@ -141,21 +179,40 @@ def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool):
         new_path = album_dir / new_name
         if new_path.exists() and new_path != mp3_path:
             print(f"  WARNING: Cannot rename '{mp3_path.name}' -> '{new_name}' (target exists)")
+            log.append({
+                'type': 'file',
+                'status': 'skipped',
+                'reason': 'Target file already exists',
+                'previous_path': str(mp3_path),
+                'new_path': str(new_path),
+            })
             continue
 
         if dry_run:
             print(f"  WOULD RENAME FILE: '{mp3_path.name}' -> '{new_name}'")
+            log.append({
+                'type': 'file',
+                'status': 'would_rename',
+                'previous_path': str(mp3_path),
+                'new_path': str(new_path),
+            })
         else:
             mp3_path.rename(new_path)
             print(f"  RENAMED FILE: '{mp3_path.name}' -> '{new_name}'")
+            log.append({
+                'type': 'file',
+                'status': 'renamed',
+                'previous_path': str(mp3_path),
+                'new_path': str(new_path),
+            })
 
 
 def parse_track_filename(filename: str) -> tuple[int | None, str]:
     """Extract track number and title from filename. Returns (track_num, title)."""
     name = Path(filename).stem
 
-    # Try: 01 - Track Name, 01. Track Name, 01 Track Name
-    m = re.match(r'^(\d{1,3})\s*[-–.]\s*(.+)', name)
+    # Try: 01 - Track Name, 01. Track Name, 01 Track Name (any dash type)
+    m = re.match(r'^(\d{1,3})\s*[-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D.]\s*(.+)', name)
     if m:
         return int(m.group(1)), m.group(2).strip()
 
@@ -241,7 +298,6 @@ def fetch_cover_art(release_id: str) -> bytes | None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
-        # Try the release group instead
         pass
     return None
 
@@ -352,7 +408,6 @@ def apply_tags(
 
     # Album cover art
     if cover_art:
-        # Remove existing APIC frames
         tags.delall('APIC')
         tags.add(APIC(
             encoding=3,
@@ -367,7 +422,7 @@ def apply_tags(
 
 
 def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
-                  dry_run: bool, skip_art: bool, rename: bool) -> int:
+                  dry_run: bool, skip_art: bool, rename: bool, log: list) -> int:
     """Process all MP3s in an album directory. Returns count of files processed."""
     folder_name = album_dir.name
     year, album_name = parse_album_folder(folder_name)
@@ -421,14 +476,14 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
 
     # Rename album folder to [YEAR] Album Name format
     if rename and year:
-        album_dir = rename_album_folder(album_dir, year, mb_album_name, dry_run)
+        album_dir = rename_album_folder(album_dir, year, mb_album_name, dry_run, log)
         # Re-scan mp3 files after potential rename
         if not dry_run:
             mp3_files = sorted(album_dir.glob('*.mp3'), key=lambda p: p.name)
 
     # Rename track files to "NN - Title.mp3" format
     if rename and track_map:
-        rename_track_files(album_dir, track_map, dry_run)
+        rename_track_files(album_dir, track_map, dry_run, log)
         # Re-scan after potential renames
         if not dry_run:
             mp3_files = sorted(album_dir.glob('*.mp3'), key=lambda p: p.name)
@@ -466,13 +521,28 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         art_indicator = " [+art]" if changes.get('has_cover') else ""
         genre_str = f" [{changes.get('genre')}]" if changes.get('genre') else ""
         print(f"  {status}: {track} - {title}{genre_str}{art_indicator}")
+
+        log.append({
+            'type': 'file',
+            'status': 'would_tag' if dry_run else 'tagged',
+            'previous_path': str(mp3_path),
+            'new_path': str(mp3_path),
+            'artist': changes.get('artist', ''),
+            'album': changes.get('album', ''),
+            'title': changes.get('title', ''),
+            'track': changes.get('track', ''),
+            'genre': changes.get('genre', ''),
+            'year': changes.get('year', ''),
+            'has_cover': str(changes.get('has_cover', False)),
+            'mb_matched': str(release is not None),
+        })
         count += 1
 
     return count
 
 
 def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_art: bool,
-                     rename: bool = False):
+                     rename: bool = False, output_file: str | None = None):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -483,6 +553,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
     if dry_run:
         print("DRY RUN MODE — no files will be modified\n")
 
+    log: list[dict] = []
     total = 0
     artist_dirs = sorted([d for d in root_path.iterdir() if d.is_dir()])
 
@@ -491,7 +562,6 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
         return
 
     # Check if the root itself looks like an artist folder (contains album folders with MP3s)
-    # by checking if any immediate subdirectories have MP3s
     has_mp3_in_subdirs = False
     for d in artist_dirs:
         if list(d.glob('*.mp3')):
@@ -499,7 +569,6 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
             break
 
     if has_mp3_in_subdirs:
-        # Root might be an artist folder — treat it as Artist/albums
         print(f"NOTE: It looks like '{root_path.name}' might be an artist folder.")
         print("       Expected structure: ArtistName/[Year] Album/tracks.mp3")
         print("       If results look wrong, pass the parent directory instead.\n")
@@ -511,20 +580,67 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
         artist_name = artist_dir.name
         album_dirs = sorted([d for d in artist_dir.iterdir() if d.is_dir()])
 
-        # If this artist folder itself contains mp3s (flat structure), treat it as a single album
+        # If this artist folder itself contains mp3s (flat structure), skip with warning
         direct_mp3s = list(artist_dir.glob('*.mp3'))
         if direct_mp3s and not album_dirs:
             print(f"\n  WARNING: MP3s found directly in '{artist_name}/' — skipping.")
             print(f"           Expected: {artist_name}/[YEAR] Album Name/track.mp3")
+            for mp3_path in direct_mp3s:
+                log.append({
+                    'type': 'file',
+                    'status': 'skipped',
+                    'reason': 'MP3 found directly in artist folder (no album subfolder)',
+                    'previous_path': str(mp3_path),
+                    'new_path': '',
+                    'artist': artist_name,
+                    'album': '',
+                    'title': '',
+                    'track': '',
+                    'genre': '',
+                    'year': '',
+                    'has_cover': '',
+                    'mb_matched': '',
+                })
             continue
 
         for album_dir in album_dirs:
             if not album_dir.is_dir():
                 continue
-            count = process_album(artist_name, album_dir, genre_override, dry_run, skip_art, rename)
+            count = process_album(artist_name, album_dir, genre_override, dry_run,
+                                  skip_art, rename, log)
             total += count
 
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Done! Processed {total} file(s).")
+
+    # Write output report
+    if output_file:
+        write_output_report(output_file, log, dry_run)
+
+
+def write_output_report(output_file: str, log: list[dict], dry_run: bool):
+    """Write the processing log to a CSV file."""
+    output_path = Path(output_file).resolve()
+
+    fieldnames = [
+        'type', 'status', 'reason', 'previous_path', 'new_path',
+        'artist', 'album', 'title', 'track', 'genre', 'year',
+        'has_cover', 'mb_matched',
+    ]
+
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        for entry in log:
+            writer.writerow(entry)
+
+    print(f"Output report written to: {output_path}")
+    print(f"  Total entries: {len(log)}")
+
+    # Summary counts
+    tagged = sum(1 for e in log if e['status'] in ('tagged', 'would_tag'))
+    renamed = sum(1 for e in log if e['status'] in ('renamed', 'would_rename'))
+    skipped = sum(1 for e in log if e['status'] == 'skipped')
+    print(f"  Tagged: {tagged}, Renamed: {renamed}, Skipped: {skipped}")
 
 
 def main():
@@ -542,12 +658,13 @@ Expected folder structure:
         01. First Song.mp3
 
 Examples:
-  %(prog)s /path/to/music --dry-run       # preview changes
-  %(prog)s /path/to/music                 # apply tags
-  %(prog)s /path/to/music --genre Rock    # force genre
-  %(prog)s /path/to/music --no-art        # skip album art
-  %(prog)s /path/to/music --rename        # also fix folder/file names
-  %(prog)s /path/to/music --rename --dry-run  # preview renames
+  %(prog)s /path/to/music --dry-run              # preview changes
+  %(prog)s /path/to/music                        # apply tags
+  %(prog)s /path/to/music --genre Rock           # force genre
+  %(prog)s /path/to/music --no-art               # skip album art
+  %(prog)s /path/to/music --rename               # also fix folder/file names
+  %(prog)s /path/to/music --rename --dry-run     # preview renames
+  %(prog)s /path/to/music --output report.csv    # generate output report
         """
     )
     parser.add_argument('directory', help='Root music directory to scan')
@@ -560,9 +677,13 @@ Examples:
     parser.add_argument('--rename', action='store_true',
                         help='Rename album folders to [YEAR] Album Name format and '
                              'track files to "NN - Title.mp3" using MusicBrainz data')
+    parser.add_argument('--output', type=str, default=None, metavar='FILE',
+                        help='Write a CSV report of all changes (previous paths, '
+                             'new paths, skipped files)')
 
     args = parser.parse_args()
-    scan_and_process(args.directory, args.genre, args.dry_run, args.no_art, args.rename)
+    scan_and_process(args.directory, args.genre, args.dry_run, args.no_art,
+                     args.rename, args.output)
 
 
 if __name__ == '__main__':
