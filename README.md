@@ -17,7 +17,15 @@ A Python script that automatically tags MP3 files with metadata from [MusicBrain
 ## Requirements
 
 - Python 3.10+
-- Two Python packages:
+- Two Python packages: `mutagen` and `musicbrainzngs`
+
+Install via the requirements file:
+
+```bash
+pip3 install -r requirements.txt
+```
+
+Or if that doesn't work, install them directly:
 
 ```bash
 pip3 install mutagen musicbrainzngs
