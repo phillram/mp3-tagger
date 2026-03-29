@@ -12,11 +12,12 @@ A Python script that automatically tags audio files (MP3, FLAC, M4A) with metada
 - **Preserve existing art** — `--keep-art` prevents overwriting cover art that's already embedded
 - **Multi-disc support** — automatically detects `CD1/`, `CD2/`, `Disc 1/`, etc. subfolders within album directories and maps tracks to the correct disc
 - **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.ext`. Edition suffixes like "(Deluxe Edition)" in folder names are preserved
-- **Organize loose files** — `--organize` interactively looks up loose audio files on MusicBrainz, lets you pick the correct album from a list, then creates subfolders and moves files
+- **Organize loose files** — `--organize` interactively looks up loose audio files on MusicBrainz, lets you pick the correct album from a list (studio albums shown first, compilations last), then creates subfolders and moves files
 - **Organize report** — `--organize-report FILE` surveys loose files via MusicBrainz and writes a text report of album groupings and unmatched files without moving anything
+- **Strip artist from filenames** — `--strip-artist` removes the artist name prefix from track filenames (e.g. `Styx - Lady.mp3` becomes `Lady.mp3`)
 - **Hyphen normalization** — automatically replaces en-dashes, em-dashes, and other Unicode dash characters with standard hyphens (`-`) in all renamed folders and filenames
 - **Strip comments** — optionally remove all comment (COMM) frames from ID3 tags, useful for cleaning out ripping software notes, encoder info, or other junk text
-- **Skip already-tagged** — `--skip-tagged` skips files that already have complete tags, saving time on re-runs
+- **Skip already-tagged** — `--skip-tagged` skips files that already have complete tags (including genre and cover art), saving time on re-runs
 - **Filter by artist/album** — `--filter` processes only matching artists or albums in a large library
 - **Confirmation mode** — `--confirm` shows a full preview and asks for approval before making changes
 - **Output report** — generate a CSV report of all changes: previous paths, new paths, tagged files, and any skipped files
@@ -236,6 +237,15 @@ python3 tag_mp3s.py /path/to/music --strip-comments
 
 Removes all comment (COMM) frames from the ID3 tags on each MP3. These often contain junk text left by ripping software, encoders, or download tools (e.g. "Ripped with EAC", "Downloaded from...", encoder settings). Works with `--dry-run` to preview which files have comments before removing them.
 
+### Strip artist name from filenames
+
+```bash
+python3 tag_mp3s.py /path/to/music --strip-artist
+python3 tag_mp3s.py /path/to/music --strip-artist --dry-run
+```
+
+Removes the artist name prefix from track filenames. Useful when files are named `Artist - Song Title.mp3` and you want just `Song Title.mp3` (or `01 Song Title.mp3` if a track number is present). Works with `--dry-run` to preview renames first.
+
 ### Generate an output report
 
 ```bash
@@ -270,6 +280,7 @@ python3 tag_mp3s.py /path/to/music --rename --output report.csv
 python3 tag_mp3s.py /path/to/music --rename --strip-comments --skip-tagged
 python3 tag_mp3s.py /path/to/music --filter "Radiohead" --rename --confirm
 python3 tag_mp3s.py /path/to/music --keep-art --skip-tagged --output report.csv
+python3 tag_mp3s.py /path/to/music --strip-artist --rename --dry-run
 python3 tag_mp3s.py /path/to/music --organize --rename --confirm
 python3 tag_mp3s.py /path/to/music --organize-report survey.txt --filter "Radiohead"
 ```
@@ -284,9 +295,10 @@ python3 tag_mp3s.py /path/to/music --organize-report survey.txt --filter "Radioh
 | `--genre TEXT` | Override genre for all albums |
 | `--no-art` | Skip fetching album cover art |
 | `--keep-art` | Don't overwrite existing embedded cover art |
-| `--skip-tagged` | Skip files with complete tags |
+| `--skip-tagged` | Skip files with complete tags (including genre and cover art) |
 | `--filter TEXT` | Only process matching artists/albums |
 | `--strip-comments` | Remove ID3 comment frames |
+| `--strip-artist` | Remove artist name prefix from track filenames |
 | `--organize` | Interactively sort loose files into album subfolders |
 | `--organize-report FILE` | Survey loose files and write a text report (no files moved) |
 | `--output FILE` | Write a CSV report of all changes |
