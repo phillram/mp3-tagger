@@ -440,6 +440,35 @@ def search_release(artist: str, album: str, year: str | None = None) -> dict | N
     return full.get('release', full)
 
 
+def _search_mb_recording(artist: str, title: str) -> dict | None:
+    """Search MusicBrainz for a recording by artist and title to find its album."""
+    query = f'artist:"{artist}" AND recording:"{title}"'
+    try:
+        results = _mb_api_call(mb.search_recordings, query=query, limit=5)
+        recordings = results.get('recording-list', [])
+        if not recordings:
+            return None
+
+        for recording in recordings:
+            release_list = recording.get('release-list', [])
+            if release_list:
+                release = release_list[0]
+                year = None
+                if release.get('date'):
+                    year = release['date'][:4]
+                return {
+                    'album': release.get('title', ''),
+                    'year': year,
+                    'release_id': release.get('id'),
+                    'recording_title': recording.get('title', title),
+                }
+
+        return None
+    except mb.WebServiceError as e:
+        print(f"    WARNING: MusicBrainz recording search failed: {e}")
+        return None
+
+
 def get_release_group_info(release: dict) -> dict:
     """Extract genre/type info from the release group."""
     info = {}
@@ -702,6 +731,104 @@ def find_audio_files(directory: Path) -> list[Path]:
     return sorted(files, key=lambda p: (p.parent.name, p.name))
 
 
+def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[Path],
+                         dry_run: bool, log: list) -> list[Path]:
+    """Organize loose audio files into album subfolders using MusicBrainz data.
+
+    Searches MusicBrainz for each track to determine its album, creates
+    album folders in [YEAR] Album Name format, and moves files into them.
+
+    Returns list of album directories that were created.
+    """
+    print(f"\n{'[DRY RUN] ' if dry_run else ''}Organizing {len(audio_files)} loose file(s) for {artist_name}")
+
+    # Group files by album using MusicBrainz recording lookups
+    album_groups: dict[tuple, dict] = {}
+    unmatched: list[Path] = []
+
+    for audio_path in sorted(audio_files, key=lambda p: p.name):
+        _, file_title = parse_track_filename(audio_path.name)
+        print(f"  Looking up: {file_title}")
+
+        result = _search_mb_recording(artist_name, file_title)
+        if not result or not result.get('album'):
+            print(f"    No album found")
+            unmatched.append(audio_path)
+            continue
+
+        album_key = (result['album'], result.get('year', ''))
+        if album_key not in album_groups:
+            album_groups[album_key] = {
+                'album': result['album'],
+                'year': result.get('year'),
+                'release_id': result.get('release_id'),
+                'files': [],
+            }
+        album_groups[album_key]['files'].append(audio_path)
+        print(f"    -> {result['album']} ({result.get('year', '?')})")
+
+    if unmatched:
+        print(f"  {len(unmatched)} file(s) could not be matched to an album")
+        for f in unmatched:
+            log.append({
+                'type': 'file',
+                'status': 'skipped',
+                'reason': 'No MusicBrainz album match found for recording',
+                'previous_path': str(f),
+                'new_path': '',
+            })
+
+    # Create album folders and move files
+    created_dirs: list[Path] = []
+    for (_album_key, _year_key), group in album_groups.items():
+        album_name = group['album']
+        year = group['year']
+
+        if year:
+            folder_name = build_album_folder_name(year, album_name)
+        else:
+            folder_name = sanitize_filename(album_name)
+
+        album_dir = artist_dir / folder_name
+
+        if dry_run:
+            print(f"  WOULD CREATE: '{folder_name}/' ({len(group['files'])} file(s))")
+            for f in group['files']:
+                print(f"    WOULD MOVE: '{f.name}' -> '{folder_name}/'")
+                log.append({
+                    'type': 'file',
+                    'status': 'would_rename',
+                    'previous_path': str(f),
+                    'new_path': str(album_dir / f.name),
+                })
+        else:
+            album_dir.mkdir(exist_ok=True)
+            print(f"  CREATED: '{folder_name}/'")
+            for f in group['files']:
+                new_path = album_dir / f.name
+                if new_path.exists():
+                    print(f"    WARNING: Cannot move '{f.name}' (target exists in '{folder_name}/')")
+                    log.append({
+                        'type': 'file',
+                        'status': 'skipped',
+                        'reason': 'Target file already exists in album folder',
+                        'previous_path': str(f),
+                        'new_path': str(new_path),
+                    })
+                    continue
+                f.rename(new_path)
+                print(f"    MOVED: '{f.name}' -> '{folder_name}/'")
+                log.append({
+                    'type': 'file',
+                    'status': 'renamed',
+                    'previous_path': str(f),
+                    'new_path': str(new_path),
+                })
+            created_dirs.append(album_dir)
+
+    return created_dirs
+
+
 def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                   dry_run: bool, skip_art: bool, rename: bool, strip_comments: bool,
                   log: list, skip_tagged: bool = False, keep_art: bool = False) -> int:
@@ -869,7 +996,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                      rename: bool = False, strip_comments: bool = False,
                      output_file: str | None = None, filter_str: str | None = None,
                      skip_tagged: bool = False, keep_art: bool = False,
-                     confirm: bool = False):
+                     confirm: bool = False, organize: bool = False):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -882,7 +1009,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
         scan_and_process(root, genre_override, dry_run=True, skip_art=skip_art,
                          rename=rename, strip_comments=strip_comments,
                          output_file=None, filter_str=filter_str,
-                         skip_tagged=skip_tagged, keep_art=keep_art, confirm=False)
+                         skip_tagged=skip_tagged, keep_art=keep_art,
+                         confirm=False, organize=organize)
         print()
         try:
             answer = input("Apply these changes? [y/N] ").strip().lower()
@@ -935,12 +1063,18 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
 
         album_dirs = sorted([d for d in artist_dir.iterdir() if d.is_dir()])
 
-        # If this artist folder itself contains audio files (flat structure), skip with warning
+        # Handle loose audio files in artist folder (flat structure)
         direct_audio = [f for f in artist_dir.iterdir()
                         if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS]
-        if direct_audio and not album_dirs:
+        if direct_audio and organize:
+            organize_loose_files(artist_name, artist_dir, direct_audio, dry_run, log)
+            # Re-scan album dirs after organizing (new folders may have been created)
+            if not dry_run:
+                album_dirs = sorted([d for d in artist_dir.iterdir() if d.is_dir()])
+        elif direct_audio and not album_dirs:
             print(f"\n  WARNING: Audio files found directly in '{artist_name}/' — skipping.")
             print(f"           Expected: {artist_name}/[YEAR] Album Name/track.mp3")
+            print(f"           Use --organize to auto-create album folders from MusicBrainz data")
             for audio_path in direct_audio:
                 stats['skipped'] += 1
                 log.append({
@@ -1071,6 +1205,7 @@ Examples:
   %(prog)s /path/to/music --skip-tagged          # skip already-tagged files
   %(prog)s /path/to/music --filter "Radiohead"   # process one artist only
   %(prog)s /path/to/music --strip-comments       # remove ID3 comments
+  %(prog)s /path/to/music --organize             # sort loose files into album folders
   %(prog)s /path/to/music --output report.csv    # generate output report
         """
     )
@@ -1097,6 +1232,9 @@ Examples:
                              '(case-insensitive substring match)')
     parser.add_argument('--strip-comments', action='store_true',
                         help='Remove all comment (COMM) frames from MP3 ID3 tags')
+    parser.add_argument('--organize', action='store_true',
+                        help='Look up loose files in artist folders on MusicBrainz, '
+                             'create album subfolders, and move them before tagging')
     parser.add_argument('--output', type=str, default=None, metavar='FILE',
                         help='Write a CSV report of all changes (previous paths, '
                              'new paths, skipped files)')
@@ -1107,7 +1245,7 @@ Examples:
         rename=args.rename, strip_comments=args.strip_comments,
         output_file=args.output, filter_str=args.filter_str,
         skip_tagged=args.skip_tagged, keep_art=args.keep_art,
-        confirm=args.confirm,
+        confirm=args.confirm, organize=args.organize,
     )
 
 

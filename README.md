@@ -11,7 +11,8 @@ A Python script that automatically tags audio files (MP3, FLAC, M4A) with metada
 - **Album cover art** — downloads front cover art from the Cover Art Archive and embeds it in each file
 - **Preserve existing art** — `--keep-art` prevents overwriting cover art that's already embedded
 - **Multi-disc support** — automatically detects `CD1/`, `CD2/`, `Disc 1/`, etc. subfolders within album directories and maps tracks to the correct disc
-- **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.ext`
+- **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.ext`. Edition suffixes like "(Deluxe Edition)" in folder names are preserved
+- **Organize loose files** — `--organize` looks up loose audio files in artist folders on MusicBrainz, automatically creates album subfolders, and moves files into them before tagging
 - **Hyphen normalization** — automatically replaces en-dashes, em-dashes, and other Unicode dash characters with standard hyphens (`-`) in all renamed folders and filenames
 - **Strip comments** — optionally remove all comment (COMM) frames from ID3 tags, useful for cleaning out ripping software notes, encoder info, or other junk text
 - **Skip already-tagged** — `--skip-tagged` skips files that already have complete tags, saving time on re-runs
@@ -19,6 +20,7 @@ A Python script that automatically tags audio files (MP3, FLAC, M4A) with metada
 - **Confirmation mode** — `--confirm` shows a full preview and asks for approval before making changes
 - **Output report** — generate a CSV report of all changes: previous paths, new paths, tagged files, and any skipped files
 - **Summary stats** — prints a summary at the end showing counts for artists, albums, files tagged, MusicBrainz matches/misses, renames, and skips
+- **Error resilience** — files that can't be written (e.g. locked or read-only) are skipped with a warning instead of stopping the entire run
 - **Retry on errors** — automatically retries MusicBrainz API calls on transient network errors (503, 429, timeouts) with exponential backoff
 - **Dry-run mode** — preview all changes before anything is modified
 - **Genre override** — force a specific genre across all albums
@@ -61,6 +63,8 @@ The script expects your music to be organised as:
       CD2/
         01 Bonus Track.mp3
 ```
+
+If some of your artists have loose files without album subfolders (e.g. `Artist/01 - Song.mp3`), use `--organize` to automatically sort them into album folders using MusicBrainz lookups.
 
 **Artist folders** should be named as the artist appears on MusicBrainz (e.g. `Radiohead`, `Kendrick Lamar`). If the name is slightly wrong, the script will detect the canonical spelling from MusicBrainz and use it in the tags (with a note in the output).
 
@@ -140,6 +144,28 @@ Use with `--dry-run` to preview renames first:
 python3 tag_mp3s.py /path/to/music --rename --dry-run
 ```
 
+### Organize loose files into album folders
+
+```bash
+python3 tag_mp3s.py /path/to/music --organize
+```
+
+If audio files are found directly in an artist folder (e.g. `Radiohead/Karma Police.mp3` instead of `Radiohead/[1997] OK Computer/Karma Police.mp3`), `--organize` will:
+
+1. Look up each track on MusicBrainz by artist name + song title
+2. Group the files by album
+3. Create `[YEAR] Album Name` subfolders
+4. Move the files into the correct album folders
+5. Then continue with normal tagging on the newly created albums
+
+Use with `--dry-run` to preview what would happen:
+
+```bash
+python3 tag_mp3s.py /path/to/music --organize --dry-run
+```
+
+Files that can't be matched to any album on MusicBrainz are left in place and logged as skipped.
+
 ### Skip already-tagged files
 
 ```bash
@@ -208,6 +234,7 @@ python3 tag_mp3s.py /path/to/music --rename --output report.csv
 python3 tag_mp3s.py /path/to/music --rename --strip-comments --skip-tagged
 python3 tag_mp3s.py /path/to/music --filter "Radiohead" --rename --confirm
 python3 tag_mp3s.py /path/to/music --keep-art --skip-tagged --output report.csv
+python3 tag_mp3s.py /path/to/music --organize --rename --confirm
 ```
 
 ## All Options
@@ -223,6 +250,7 @@ python3 tag_mp3s.py /path/to/music --keep-art --skip-tagged --output report.csv
 | `--skip-tagged` | Skip files with complete tags |
 | `--filter TEXT` | Only process matching artists/albums |
 | `--strip-comments` | Remove ID3 comment frames |
+| `--organize` | Sort loose files in artist folders into album subfolders |
 | `--output FILE` | Write a CSV report of all changes |
 
 ## What Gets Tagged
@@ -245,13 +273,15 @@ Each audio file receives the following tags (format-appropriate):
 ## How It Works
 
 1. **Scan** — walks the directory tree looking for `Artist/Album/track` structure (including multi-disc subfolders)
-2. **Parse** — extracts artist name, album name, year, and track numbers from folder/file names
-3. **Search** — queries the MusicBrainz API to find the matching release, with fuzzy fallback
-4. **Correct** — uses canonical artist name and album title from MusicBrainz
-5. **Fetch** — pulls detailed track info, genre tags, label, and cover art
-6. **Write** — applies tags to each audio file in the appropriate format
-7. **Rename** (optional) — renames folders and files to the canonical format
-8. **Report** — prints summary stats and optionally writes a CSV report
+2. **Organize** (optional) — if `--organize` is set, looks up loose files via MusicBrainz recordings, creates album folders, and moves files in
+3. **Parse** — extracts artist name, album name, year, and track numbers from folder/file names
+4. **Search** — queries the MusicBrainz API to find the matching release, with fuzzy fallback
+5. **Correct** — uses canonical artist name and album title from MusicBrainz (preserving edition suffixes like "Deluxe Edition" in folder names)
+6. **Fetch** — pulls detailed track info, genre tags, label, and cover art
+7. **Match** — maps each file to its MusicBrainz track info in a single pass, ensuring consistent metadata for both renames and tags
+8. **Write** — applies tags to each audio file in the appropriate format
+9. **Rename** (optional) — renames folders and files to the canonical format
+10. **Report** — prints summary stats and optionally writes a CSV report
 
 ## Rate Limiting
 
@@ -264,5 +294,7 @@ MusicBrainz requires a maximum of 1 request per second. The script automatically
 **Wrong album matched** — If MusicBrainz returns the wrong release (e.g. a remaster instead of the original), check the dry-run output. You may need to adjust the album folder name to be more specific.
 
 **"No cover art found"** — Not all releases have cover art on the Cover Art Archive. You can add art manually using any tag editor.
+
+**Permission denied errors** — If a file is locked by another process (media player, file explorer preview, cloud sync) or marked read-only, the script will skip it with an error message and continue to the next file. Close any programs that might have the file open and re-run with `--skip-tagged` to process only the files that were missed.
 
 **Rate limit errors** — If you see HTTP 503 errors, MusicBrainz is throttling you. The script handles this with automatic retries and built-in delays, but an extremely large library might occasionally hit limits. Use `--skip-tagged` on re-runs to avoid re-processing already-completed files.
