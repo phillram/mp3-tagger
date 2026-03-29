@@ -157,6 +157,29 @@ def build_album_folder_name(year: str, album_name: str) -> str:
     return f"[{year}] {safe_name}"
 
 
+def _preserve_album_suffix(original_album: str, mb_album: str) -> str:
+    """Preserve trailing parenthesized/bracketed suffixes from the original album name
+    when the MusicBrainz title doesn't include them.
+
+    Example: original="Album (Deluxe Edition)", mb="Album" -> "Album (Deluxe Edition)"
+    """
+    suffix_match = re.search(r'(\s*(?:[\(\[][^)\]]+[\)\]]\s*)+)$', original_album)
+    if not suffix_match:
+        return mb_album
+
+    suffix = suffix_match.group(1).rstrip()
+
+    # If MB title already contains this suffix text, no change needed
+    if suffix.strip().lower() in mb_album.lower():
+        return mb_album
+
+    # If MB title already has its own trailing parenthesized/bracketed text, don't double up
+    if re.search(r'\s*[\(\[][^)\]]+[\)\]]\s*$', mb_album):
+        return mb_album
+
+    return mb_album.rstrip() + suffix
+
+
 def rename_album_folder(album_dir: Path, year: str, album_name: str,
                         dry_run: bool, log: list) -> Path:
     """Rename an album folder to [YEAR] Album Name format. Returns the new path."""
@@ -199,33 +222,18 @@ def rename_album_folder(album_dir: Path, year: str, album_name: str,
         return new_path
 
 
-def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool, log: list):
-    """Rename track files to 'NN - Track Title.ext' format using MusicBrainz data."""
-    audio_files = find_audio_files(album_dir)
-    for mp3_path in audio_files:
-        file_track_num, file_title = parse_track_filename(mp3_path.name)
-        if not file_track_num or not track_map:
-            continue
+def rename_track_files(file_to_track: dict[str, dict | None], dry_run: bool,
+                       log: list) -> dict[str, str]:
+    """Rename track files to 'NN - Track Title.ext' using pre-matched track info.
 
-        # Infer disc number from subfolder name (CD1, Disc 2, etc.)
-        disc_match = re.match(r'(?:cd|disc|disk)\s*(\d+)', mp3_path.parent.name, re.IGNORECASE)
-        inferred_disc = int(disc_match.group(1)) if disc_match else None
-
-        # Find matching track info
-        track_info = None
-        if inferred_disc:
-            track_info = track_map.get((inferred_disc, file_track_num))
-        if not track_info:
-            track_info = track_map.get((1, file_track_num))
-        if not track_info:
-            for key, val in track_map.items():
-                if key[1] == file_track_num:
-                    track_info = val
-                    break
-
+    Returns a mapping of old_path -> new_path for files that were actually renamed.
+    """
+    path_updates: dict[str, str] = {}
+    for filepath_str, track_info in file_to_track.items():
         if not track_info:
             continue
 
+        mp3_path = Path(filepath_str)
         mb_title = track_info['title']
         track_num = track_info['track_num']
         safe_title = sanitize_filename(mb_title)
@@ -243,7 +251,7 @@ def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool, log: lis
                 'type': 'file',
                 'status': 'skipped',
                 'reason': 'Target file already exists',
-                'previous_path': str(mp3_path),
+                'previous_path': filepath_str,
                 'new_path': str(new_path),
             })
             continue
@@ -253,7 +261,7 @@ def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool, log: lis
             log.append({
                 'type': 'file',
                 'status': 'would_rename',
-                'previous_path': str(mp3_path),
+                'previous_path': filepath_str,
                 'new_path': str(new_path),
             })
         else:
@@ -262,9 +270,12 @@ def rename_track_files(album_dir: Path, track_map: dict, dry_run: bool, log: lis
             log.append({
                 'type': 'file',
                 'status': 'renamed',
-                'previous_path': str(mp3_path),
+                'previous_path': filepath_str,
                 'new_path': str(new_path),
             })
+            path_updates[filepath_str] = str(new_path)
+
+    return path_updates
 
 
 def _file_has_cover_art(filepath: str) -> bool:
@@ -324,6 +335,37 @@ def parse_track_filename(filename: str) -> tuple[int | None, str]:
         return int(m.group(1)), m.group(2).strip()
 
     return None, name
+
+
+def match_files_to_tracks(audio_files: list[Path], track_map: dict) -> dict[str, dict | None]:
+    """Build a mapping of audio file path (str) -> MusicBrainz track info.
+
+    Performs track matching once so the same mapping can be used for both
+    renaming and tagging, ensuring each file gets the correct metadata.
+    """
+    file_to_track: dict[str, dict | None] = {}
+    for mp3_path in audio_files:
+        file_track_num, _ = parse_track_filename(mp3_path.name)
+
+        track_info = None
+        if track_map and file_track_num:
+            # Infer disc number from subfolder name (CD1, Disc 2, etc.)
+            disc_match = re.match(r'(?:cd|disc|disk)\s*(\d+)', mp3_path.parent.name, re.IGNORECASE)
+            inferred_disc = int(disc_match.group(1)) if disc_match else None
+
+            if inferred_disc:
+                track_info = track_map.get((inferred_disc, file_track_num))
+            if not track_info:
+                track_info = track_map.get((1, file_track_num))
+            if not track_info:
+                for key, val in track_map.items():
+                    if key[1] == file_track_num:
+                        track_info = val
+                        break
+
+        file_to_track[str(mp3_path)] = track_info
+
+    return file_to_track
 
 
 def _search_mb_releases(artist: str, album: str, year: str | None = None) -> list:
@@ -705,8 +747,9 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         if not year and release.get('date'):
             year = release['date'][:4]
 
-        # Use the MusicBrainz album title (canonical spelling/casing)
-        mb_album_name = release.get('title', album_name)
+        # Use the MusicBrainz album title, preserving any edition suffix from the
+        # original folder name (e.g. "(Deluxe Edition)") that MB doesn't include.
+        mb_album_name = _preserve_album_suffix(album_name, release.get('title', album_name))
 
         # Fetch cover art
         if not skip_art:
@@ -720,57 +763,56 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         mb_album_name = album_name
         print("  WARNING: No MusicBrainz match found — using filename metadata only")
 
+    # Match every file to its MusicBrainz track info ONCE, before any renaming.
+    # This single mapping is then used for both renaming and tagging so each
+    # file is guaranteed to get the correct metadata.
+    file_to_track = match_files_to_tracks(mp3_files, track_map)
+
     # Rename album folder to [YEAR] Album Name format
     if rename and year:
+        old_album_dir = album_dir
         album_dir = rename_album_folder(album_dir, year, mb_album_name, dry_run, log)
-        # Re-scan files after potential rename
-        if not dry_run:
-            mp3_files = find_audio_files(album_dir)
+        # Update file_to_track paths after folder rename
+        if not dry_run and album_dir != old_album_dir:
+            updated: dict[str, dict | None] = {}
+            old_prefix = str(old_album_dir)
+            new_prefix = str(album_dir)
+            for fpath, tinfo in file_to_track.items():
+                if fpath.startswith(old_prefix):
+                    updated[new_prefix + fpath[len(old_prefix):]] = tinfo
+                else:
+                    updated[fpath] = tinfo
+            file_to_track = updated
 
-    # Rename track files to "NN - Title.ext" format
+    # Rename track files to "NN - Title.ext" format using the pre-matched mapping
     if rename and track_map:
-        rename_track_files(album_dir, track_map, dry_run, log)
-        # Re-scan after potential renames
-        if not dry_run:
-            mp3_files = find_audio_files(album_dir)
+        path_updates = rename_track_files(file_to_track, dry_run, log)
+        # Update file_to_track paths after file renames
+        if path_updates:
+            updated = {}
+            for fpath, tinfo in file_to_track.items():
+                updated[path_updates.get(fpath, fpath)] = tinfo
+            file_to_track = updated
 
     count = 0
     skipped_tagged = 0
-    for mp3_path in mp3_files:
+    for filepath_str, track_info in file_to_track.items():
+        mp3_path = Path(filepath_str)
+
         # Skip already-tagged files if requested
-        if skip_tagged and has_complete_tags(str(mp3_path)):
+        if skip_tagged and has_complete_tags(filepath_str):
             skipped_tagged += 1
             continue
-
-        file_track_num, file_title = parse_track_filename(mp3_path.name)
-
-        # Try to match to MusicBrainz track data — use disc subfolder to infer disc number
-        track_info = None
-        inferred_disc = None
-        disc_match = re.match(r'(?:cd|disc|disk)\s*(\d+)', mp3_path.parent.name, re.IGNORECASE)
-        if disc_match:
-            inferred_disc = int(disc_match.group(1))
-
-        if track_map and file_track_num:
-            if inferred_disc:
-                track_info = track_map.get((inferred_disc, file_track_num))
-            if not track_info:
-                track_info = track_map.get((1, file_track_num))
-            if not track_info:
-                for key, val in track_map.items():
-                    if key[1] == file_track_num:
-                        track_info = val
-                        break
 
         # Determine cover art for this file
         file_cover_art = cover_art
         if keep_art and cover_art:
             # Preserve existing art if the file already has embedded art
-            if _file_has_cover_art(str(mp3_path)):
+            if _file_has_cover_art(filepath_str):
                 file_cover_art = None
 
         changes = apply_tags(
-            filepath=str(mp3_path),
+            filepath=filepath_str,
             artist=artist_name,
             album=mb_album_name,
             year=year,
@@ -793,8 +835,8 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         log.append({
             'type': 'file',
             'status': 'would_tag' if dry_run else 'tagged',
-            'previous_path': str(mp3_path),
-            'new_path': str(mp3_path),
+            'previous_path': filepath_str,
+            'new_path': filepath_str,
             'artist': changes.get('artist', ''),
             'album': changes.get('album', ''),
             'title': changes.get('title', ''),
