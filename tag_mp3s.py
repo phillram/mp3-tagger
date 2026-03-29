@@ -811,18 +811,29 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
             if _file_has_cover_art(filepath_str):
                 file_cover_art = None
 
-        changes = apply_tags(
-            filepath=filepath_str,
-            artist=artist_name,
-            album=mb_album_name,
-            year=year,
-            track_info=track_info,
-            genre=genre,
-            label=label,
-            cover_art=file_cover_art,
-            dry_run=dry_run,
-            strip_comments=strip_comments,
-        )
+        try:
+            changes = apply_tags(
+                filepath=filepath_str,
+                artist=artist_name,
+                album=mb_album_name,
+                year=year,
+                track_info=track_info,
+                genre=genre,
+                label=label,
+                cover_art=file_cover_art,
+                dry_run=dry_run,
+                strip_comments=strip_comments,
+            )
+        except (PermissionError, mutagen.MutagenError) as e:
+            print(f"  ERROR: Could not tag '{mp3_path.name}': {e}")
+            log.append({
+                'type': 'file',
+                'status': 'skipped',
+                'reason': str(e),
+                'previous_path': filepath_str,
+                'new_path': filepath_str,
+            })
+            continue
 
         status = "WOULD TAG" if dry_run else "TAGGED"
         title = changes.get('title', '?')
