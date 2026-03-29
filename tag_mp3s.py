@@ -440,33 +440,44 @@ def search_release(artist: str, album: str, year: str | None = None) -> dict | N
     return full.get('release', full)
 
 
-def _search_mb_recording(artist: str, title: str) -> dict | None:
-    """Search MusicBrainz for a recording by artist and title to find its album."""
+def _search_mb_recording_options(artist: str, title: str) -> list[dict]:
+    """Search MusicBrainz for a recording by artist and title.
+
+    Returns a list of unique album options (up to 5), deduplicated by
+    (album_name_lower, year). Each option is a dict with keys:
+    album, year, release_id, recording_title.
+    """
     query = f'artist:"{artist}" AND recording:"{title}"'
     try:
-        results = _mb_api_call(mb.search_recordings, query=query, limit=5)
+        results = _mb_api_call(mb.search_recordings, query=query, limit=10)
         recordings = results.get('recording-list', [])
         if not recordings:
-            return None
+            return []
+
+        seen: set[tuple[str, str | None]] = set()
+        options: list[dict] = []
 
         for recording in recordings:
-            release_list = recording.get('release-list', [])
-            if release_list:
-                release = release_list[0]
-                year = None
-                if release.get('date'):
-                    year = release['date'][:4]
-                return {
-                    'album': release.get('title', ''),
+            for release in recording.get('release-list', []):
+                album = release.get('title', '')
+                year = release['date'][:4] if release.get('date') else None
+                key = (album.lower(), year)
+                if key in seen:
+                    continue
+                seen.add(key)
+                options.append({
+                    'album': album,
                     'year': year,
                     'release_id': release.get('id'),
                     'recording_title': recording.get('title', title),
-                }
+                })
+                if len(options) >= 5:
+                    return options
 
-        return None
+        return options
     except mb.WebServiceError as e:
         print(f"    WARNING: MusicBrainz recording search failed: {e}")
-        return None
+        return []
 
 
 def get_release_group_info(release: dict) -> dict:
@@ -735,14 +746,15 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
                          dry_run: bool, log: list) -> list[Path]:
     """Organize loose audio files into album subfolders using MusicBrainz data.
 
-    Searches MusicBrainz for each track to determine its album, creates
-    album folders in [YEAR] Album Name format, and moves files into them.
+    Interactive: presents album options and lets the user choose for each file.
+    If only one option is found it is auto-selected; if multiple are found the
+    user picks from a numbered list (0 = skip).
 
     Returns list of album directories that were created.
     """
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Organizing {len(audio_files)} loose file(s) for {artist_name}")
 
-    # Group files by album using MusicBrainz recording lookups
+    # Group files by album using interactive MusicBrainz recording lookups
     album_groups: dict[tuple, dict] = {}
     unmatched: list[Path] = []
 
@@ -750,22 +762,52 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
         _, file_title = parse_track_filename(audio_path.name)
         print(f"  Looking up: {file_title}")
 
-        result = _search_mb_recording(artist_name, file_title)
-        if not result or not result.get('album'):
+        options = _search_mb_recording_options(artist_name, file_title)
+        if not options:
             print(f"    No album found")
             unmatched.append(audio_path)
             continue
 
-        album_key = (result['album'], result.get('year', ''))
+        # Select an album option
+        if len(options) == 1:
+            selected = options[0]
+            print(f"    -> {selected['album']} ({selected.get('year', '?')})")
+        else:
+            print(f"    Found {len(options)} album options:")
+            for i, opt in enumerate(options, 1):
+                print(f"      {i}. {opt['album']} ({opt.get('year', '?')})")
+            print(f"      0. Skip this file")
+            try:
+                choice = input(f"    Select [1]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\n    Skipping remaining files.")
+                unmatched.append(audio_path)
+                break
+            if choice == '0':
+                print(f"    Skipped")
+                unmatched.append(audio_path)
+                continue
+            if choice == '':
+                idx = 0
+            else:
+                try:
+                    idx = int(choice) - 1
+                except ValueError:
+                    idx = 0
+            if idx < 0 or idx >= len(options):
+                idx = 0
+            selected = options[idx]
+            print(f"    -> {selected['album']} ({selected.get('year', '?')})")
+
+        album_key = (selected['album'], selected.get('year', ''))
         if album_key not in album_groups:
             album_groups[album_key] = {
-                'album': result['album'],
-                'year': result.get('year'),
-                'release_id': result.get('release_id'),
+                'album': selected['album'],
+                'year': selected.get('year'),
+                'release_id': selected.get('release_id'),
                 'files': [],
             }
         album_groups[album_key]['files'].append(audio_path)
-        print(f"    -> {result['album']} ({result.get('year', '?')})")
 
     if unmatched:
         print(f"  {len(unmatched)} file(s) could not be matched to an album")
@@ -827,6 +869,43 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
             created_dirs.append(album_dir)
 
     return created_dirs
+
+
+def survey_loose_files(artist_name: str, audio_files: list[Path]) -> tuple[dict, list]:
+    """Survey loose files via MusicBrainz without moving them (for report mode).
+
+    Non-interactive: auto-picks the first result for each file.
+    Returns (album_groups, unmatched) where album_groups maps
+    folder_name -> list of filenames, and unmatched is a list of filenames.
+    """
+    album_groups: dict[str, list[str]] = {}
+    unmatched: list[str] = []
+
+    for audio_path in sorted(audio_files, key=lambda p: p.name):
+        _, file_title = parse_track_filename(audio_path.name)
+        print(f"  Looking up: {file_title}")
+
+        options = _search_mb_recording_options(artist_name, file_title)
+        if not options:
+            print(f"    No album found")
+            unmatched.append(audio_path.name)
+            continue
+
+        selected = options[0]
+        year = selected.get('year')
+        album = selected['album']
+        if year:
+            folder_name = build_album_folder_name(year, album)
+        else:
+            folder_name = sanitize_filename(album)
+
+        print(f"    -> {album} ({year or '?'})")
+
+        if folder_name not in album_groups:
+            album_groups[folder_name] = []
+        album_groups[folder_name].append(audio_path.name)
+
+    return album_groups, unmatched
 
 
 def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
@@ -996,7 +1075,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                      rename: bool = False, strip_comments: bool = False,
                      output_file: str | None = None, filter_str: str | None = None,
                      skip_tagged: bool = False, keep_art: bool = False,
-                     confirm: bool = False, organize: bool = False):
+                     confirm: bool = False, organize: bool = False,
+                     organize_report: str | None = None):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -1010,7 +1090,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                          rename=rename, strip_comments=strip_comments,
                          output_file=None, filter_str=filter_str,
                          skip_tagged=skip_tagged, keep_art=keep_art,
-                         confirm=False, organize=organize)
+                         confirm=False, organize=organize,
+                         organize_report=None)
         print()
         try:
             answer = input("Apply these changes? [y/N] ").strip().lower()
@@ -1027,6 +1108,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
         print("DRY RUN MODE — no files will be modified\n")
 
     log: list[dict] = []
+    organize_report_data: list[dict] = []
     total = 0
     stats = {'artists': 0, 'albums': 0, 'files': 0, 'mb_matched': 0, 'mb_unmatched': 0,
              'skipped': 0, 'renamed_folders': 0, 'renamed_files': 0}
@@ -1066,7 +1148,15 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
         # Handle loose audio files in artist folder (flat structure)
         direct_audio = [f for f in artist_dir.iterdir()
                         if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS]
-        if direct_audio and organize:
+        if direct_audio and organize_report:
+            print(f"\n  Surveying {len(direct_audio)} loose file(s) for {artist_name}")
+            albums, unmatched = survey_loose_files(artist_name, direct_audio)
+            organize_report_data.append({
+                'artist': artist_name,
+                'albums': albums,
+                'unmatched': unmatched,
+            })
+        elif direct_audio and organize:
             organize_loose_files(artist_name, artist_dir, direct_audio, dry_run, log)
             # Re-scan album dirs after organizing (new folders may have been created)
             if not dry_run:
@@ -1075,6 +1165,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
             print(f"\n  WARNING: Audio files found directly in '{artist_name}/' — skipping.")
             print(f"           Expected: {artist_name}/[YEAR] Album Name/track.mp3")
             print(f"           Use --organize to auto-create album folders from MusicBrainz data")
+            print(f"           Use --organize-report FILE to survey albums without moving files")
             for audio_path in direct_audio:
                 stats['skipped'] += 1
                 log.append({
@@ -1147,6 +1238,10 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
     if output_file:
         write_output_report(output_file, log, dry_run)
 
+    # Write organize survey report
+    if organize_report and organize_report_data:
+        write_organize_report(organize_report, organize_report_data)
+
 
 def write_output_report(output_file: str, log: list[dict], dry_run: bool):
     """Write the processing log to a CSV file."""
@@ -1172,6 +1267,41 @@ def write_output_report(output_file: str, log: list[dict], dry_run: bool):
     renamed = sum(1 for e in log if e['status'] in ('renamed', 'would_rename'))
     skipped = sum(1 for e in log if e['status'] == 'skipped')
     print(f"  Tagged: {tagged}, Renamed: {renamed}, Skipped: {skipped}")
+
+
+def write_organize_report(output_file: str, report_data: list[dict]):
+    """Write an organize survey report to a text file.
+
+    report_data is a list of dicts, each with keys:
+      artist: str
+      albums: dict[str, list[str]]   (folder_name -> list of filenames)
+      unmatched: list[str]           (filenames that couldn't be matched)
+    """
+    output_path = Path(output_file).resolve()
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for entry in report_data:
+            f.write(f"=== {entry['artist']} ===\n")
+
+            if entry['unmatched']:
+                f.write("\nUnmatched:\n")
+                for name in entry['unmatched']:
+                    f.write(f"  {name}\n")
+
+            if entry['albums']:
+                f.write("\nAlbums:\n")
+                for folder_name, filenames in sorted(entry['albums'].items()):
+                    f.write(f"  {folder_name}\n")
+                    for name in filenames:
+                        f.write(f"    - {name}\n")
+
+            f.write("\n")
+
+    print(f"\nOrganize report written to: {output_path}")
+    total_artists = len(report_data)
+    total_albums = sum(len(e['albums']) for e in report_data)
+    total_unmatched = sum(len(e['unmatched']) for e in report_data)
+    print(f"  Artists: {total_artists}, Albums: {total_albums}, Unmatched files: {total_unmatched}")
 
 
 def main():
@@ -1206,6 +1336,7 @@ Examples:
   %(prog)s /path/to/music --filter "Radiohead"   # process one artist only
   %(prog)s /path/to/music --strip-comments       # remove ID3 comments
   %(prog)s /path/to/music --organize             # sort loose files into album folders
+  %(prog)s /path/to/music --organize-report r.txt # survey loose files without moving
   %(prog)s /path/to/music --output report.csv    # generate output report
         """
     )
@@ -1233,8 +1364,12 @@ Examples:
     parser.add_argument('--strip-comments', action='store_true',
                         help='Remove all comment (COMM) frames from MP3 ID3 tags')
     parser.add_argument('--organize', action='store_true',
-                        help='Look up loose files in artist folders on MusicBrainz, '
-                             'create album subfolders, and move them before tagging')
+                        help='Interactively look up loose files in artist folders on '
+                             'MusicBrainz, let you pick the correct album, create '
+                             'subfolders, and move files before tagging')
+    parser.add_argument('--organize-report', type=str, default=None, metavar='FILE',
+                        help='Survey loose files via MusicBrainz and write a text report '
+                             'of album groupings without moving any files')
     parser.add_argument('--output', type=str, default=None, metavar='FILE',
                         help='Write a CSV report of all changes (previous paths, '
                              'new paths, skipped files)')
@@ -1246,6 +1381,7 @@ Examples:
         output_file=args.output, filter_str=args.filter_str,
         skip_tagged=args.skip_tagged, keep_art=args.keep_art,
         confirm=args.confirm, organize=args.organize,
+        organize_report=args.organize_report,
     )
 
 

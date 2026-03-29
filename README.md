@@ -12,7 +12,8 @@ A Python script that automatically tags audio files (MP3, FLAC, M4A) with metada
 - **Preserve existing art** — `--keep-art` prevents overwriting cover art that's already embedded
 - **Multi-disc support** — automatically detects `CD1/`, `CD2/`, `Disc 1/`, etc. subfolders within album directories and maps tracks to the correct disc
 - **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.ext`. Edition suffixes like "(Deluxe Edition)" in folder names are preserved
-- **Organize loose files** — `--organize` looks up loose audio files in artist folders on MusicBrainz, automatically creates album subfolders, and moves files into them before tagging
+- **Organize loose files** — `--organize` interactively looks up loose audio files on MusicBrainz, lets you pick the correct album from a list, then creates subfolders and moves files
+- **Organize report** — `--organize-report FILE` surveys loose files via MusicBrainz and writes a text report of album groupings and unmatched files without moving anything
 - **Hyphen normalization** — automatically replaces en-dashes, em-dashes, and other Unicode dash characters with standard hyphens (`-`) in all renamed folders and filenames
 - **Strip comments** — optionally remove all comment (COMM) frames from ID3 tags, useful for cleaning out ripping software notes, encoder info, or other junk text
 - **Skip already-tagged** — `--skip-tagged` skips files that already have complete tags, saving time on re-runs
@@ -64,7 +65,7 @@ The script expects your music to be organised as:
         01 Bonus Track.mp3
 ```
 
-If some of your artists have loose files without album subfolders (e.g. `Artist/01 - Song.mp3`), use `--organize` to automatically sort them into album folders using MusicBrainz lookups.
+If some of your artists have loose files without album subfolders (e.g. `Artist/01 - Song.mp3`), use `--organize` to interactively sort them into album folders using MusicBrainz lookups, or `--organize-report FILE` to survey the matches first without moving anything.
 
 **Artist folders** should be named as the artist appears on MusicBrainz (e.g. `Radiohead`, `Kendrick Lamar`). If the name is slightly wrong, the script will detect the canonical spelling from MusicBrainz and use it in the tags (with a note in the output).
 
@@ -153,10 +154,12 @@ python3 tag_mp3s.py /path/to/music --organize
 If audio files are found directly in an artist folder (e.g. `Radiohead/Karma Police.mp3` instead of `Radiohead/[1997] OK Computer/Karma Police.mp3`), `--organize` will:
 
 1. Look up each track on MusicBrainz by artist name + song title
-2. Group the files by album
-3. Create `[YEAR] Album Name` subfolders
-4. Move the files into the correct album folders
-5. Then continue with normal tagging on the newly created albums
+2. If multiple albums are found, present a numbered list and let you pick the correct one (default is 1, enter 0 to skip)
+3. If only one album is found, auto-select it
+4. Group the files by your selected albums
+5. Create `[YEAR] Album Name` subfolders
+6. Move the files into the correct album folders
+7. Then continue with normal tagging on the newly created albums
 
 Use with `--dry-run` to preview what would happen:
 
@@ -165,6 +168,39 @@ python3 tag_mp3s.py /path/to/music --organize --dry-run
 ```
 
 Files that can't be matched to any album on MusicBrainz are left in place and logged as skipped.
+
+### Survey loose files without moving them
+
+```bash
+python3 tag_mp3s.py /path/to/music --organize-report report.txt
+```
+
+If you want to review the album groupings before actually organizing, `--organize-report` will:
+
+1. Look up each loose file on MusicBrainz (non-interactive, auto-picks the first result)
+2. Write a text report listing each artist, their matched albums in `[YEAR] Album Name` format, and any unmatched files
+3. **No files are moved or folders created** — this is a read-only survey
+
+The output file looks like:
+
+```
+=== Artist Name ===
+
+Unmatched:
+  some-unknown-track.mp3
+
+Albums:
+  [2005] The Black Halo
+    - When the Lights Are Down.mp3
+  [2007] Ghost Opera
+    - Ghost Opera.mp3
+```
+
+Use `--filter` to limit the survey to specific artists:
+
+```bash
+python3 tag_mp3s.py /path/to/music --organize-report report.txt --filter "Radiohead"
+```
 
 ### Skip already-tagged files
 
@@ -235,6 +271,7 @@ python3 tag_mp3s.py /path/to/music --rename --strip-comments --skip-tagged
 python3 tag_mp3s.py /path/to/music --filter "Radiohead" --rename --confirm
 python3 tag_mp3s.py /path/to/music --keep-art --skip-tagged --output report.csv
 python3 tag_mp3s.py /path/to/music --organize --rename --confirm
+python3 tag_mp3s.py /path/to/music --organize-report survey.txt --filter "Radiohead"
 ```
 
 ## All Options
@@ -250,7 +287,8 @@ python3 tag_mp3s.py /path/to/music --organize --rename --confirm
 | `--skip-tagged` | Skip files with complete tags |
 | `--filter TEXT` | Only process matching artists/albums |
 | `--strip-comments` | Remove ID3 comment frames |
-| `--organize` | Sort loose files in artist folders into album subfolders |
+| `--organize` | Interactively sort loose files into album subfolders |
+| `--organize-report FILE` | Survey loose files and write a text report (no files moved) |
 | `--output FILE` | Write a CSV report of all changes |
 
 ## What Gets Tagged
