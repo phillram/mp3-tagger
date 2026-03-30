@@ -476,18 +476,14 @@ def search_release(artist: str, album: str, year: str | None = None) -> dict | N
 
 
 def _release_type_sort_key(release_type: str) -> int:
-    """Return a sort key that puts studio albums first and compilations last."""
+    """Return a sort key for album type ordering: Album → EP → Single → Compilation → Live → Other."""
     t = release_type.lower() if release_type else ''
-    if t == 'album':
-        return 0
-    elif t == 'ep':
-        return 1
-    elif t == 'single':
-        return 2
-    elif t == 'compilation':
-        return 4
-    else:
-        return 3
+    if t == 'album':   return 0
+    elif t == 'ep':    return 1
+    elif t == 'single': return 2
+    elif t == 'compilation': return 3
+    elif t == 'live':  return 4
+    else:              return 5
 
 
 def _search_mb_recording_options(artist: str, title: str) -> list[dict]:
@@ -595,7 +591,10 @@ def _fetch_artist_albums(artist: str, include_compilations: bool = False) -> lis
                 'release_type': rg_type,
             })
 
-        albums.sort(key=lambda a: (a.get('year') or '9999'))
+        albums.sort(key=lambda a: (
+            _release_type_sort_key(a.get('release_type', '')),
+            a.get('year') or '9999',
+        ))
         return albums
     except mb.WebServiceError as e:
         print(f"    WARNING: Could not fetch artist albums: {e}")
@@ -926,8 +925,12 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
         # Combine: recording matches first, then rest of discography
         options = recording_options + remaining
 
-        # Sort all options by year (oldest first), with unknown years at the end
-        options.sort(key=lambda o: (o.get('year') or '9999'))
+        # Sort by type (Album → EP → Single → Compilation → Live → Other),
+        # then by year within each type (oldest first, unknown years last)
+        options.sort(key=lambda o: (
+            _release_type_sort_key(o.get('release_type', '')),
+            o.get('year') or '9999',
+        ))
 
         if not options:
             print(f"    No album found")
