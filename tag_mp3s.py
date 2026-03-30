@@ -11,7 +11,7 @@ Usage:
     python3 tag_mp3s.py /path/to/music --dry-run
     python3 tag_mp3s.py /path/to/music --confirm
     python3 tag_mp3s.py /path/to/music --filter "Radiohead"
-    python3 tag_mp3s.py /path/to/music --rename --skip-tagged
+    python3 tag_mp3s.py /path/to/music --rename-tracks --skip-tagged
     python3 tag_mp3s.py /path/to/music --output report.csv
 
 Requirements:
@@ -257,15 +257,14 @@ def rename_track_files(file_to_track: dict[str, dict | None], dry_run: bool,
             continue
 
         mp3_path = Path(filepath_str)
-        mb_title = track_info['title']
         track_num = track_info['track_num']
 
-        # Preserve trailing parenthesized/bracketed suffixes from the original
-        # filename that aren't in the MusicBrainz title (e.g. "(2002 Remaster)")
+        # Always use the original filename title — never substitute the MusicBrainz
+        # title, which may come from a different edition with a different track order.
+        # MB data is written to tags; the filename keeps the title you already have.
         _, original_title = parse_track_filename(mp3_path.name)
-        title_with_suffix = _preserve_album_suffix(original_title, mb_title)
 
-        safe_title = sanitize_filename(title_with_suffix)
+        safe_title = sanitize_filename(original_title)
         ext = mp3_path.suffix
         new_name = f"{track_num:02d} - {safe_title}{ext}"
 
@@ -1121,7 +1120,7 @@ def strip_artist_from_files(artist_name: str, audio_files: list[Path],
 
 
 def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
-                  dry_run: bool, skip_art: bool, rename: bool, strip_comments: bool,
+                  dry_run: bool, skip_art: bool, rename_tracks: bool, strip_comments: bool,
                   log: list, skip_tagged: bool = False, keep_art: bool = False,
                   do_strip_artist: bool = False, rename_folders: bool = False) -> int:
     """Process all audio files in an album directory. Returns count of files processed."""
@@ -1198,7 +1197,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     file_to_track = match_files_to_tracks(mp3_files, track_map)
 
     # Rename album folder to [YEAR] Album Name format
-    if (rename or rename_folders) and year:
+    if (rename_tracks or rename_folders) and year:
         old_album_dir = album_dir
         album_dir = rename_album_folder(album_dir, year, mb_album_name, dry_run, log)
         # Update file_to_track paths after folder rename
@@ -1214,7 +1213,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
             file_to_track = updated
 
     # Rename track files to "NN - Title.ext" format using the pre-matched mapping
-    if rename and track_map:
+    if rename_tracks and track_map:
         path_updates = rename_track_files(file_to_track, dry_run, log)
         # Update file_to_track paths after file renames
         if path_updates:
@@ -1295,7 +1294,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
 
 
 def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_art: bool,
-                     rename: bool = False, strip_comments: bool = False,
+                     rename_tracks: bool = False, strip_comments: bool = False,
                      output_file: str | None = None, filter_str: str | None = None,
                      skip_tagged: bool = False, keep_art: bool = False,
                      confirm: bool = False, organize: bool = False,
@@ -1313,7 +1312,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
     if confirm and not dry_run:
         print("PREVIEW MODE — showing what would be changed...\n")
         scan_and_process(root, genre_override, dry_run=True, skip_art=skip_art,
-                         rename=rename, strip_comments=strip_comments,
+                         rename_tracks=rename_tracks, strip_comments=strip_comments,
                          output_file=None, filter_str=filter_str,
                          skip_tagged=skip_tagged, keep_art=keep_art,
                          confirm=False, organize=organize,
@@ -1428,7 +1427,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
 
             stats['albums'] += 1
             count = process_album(artist_name, album_dir, genre_override, dry_run,
-                                  skip_art, rename, strip_comments, log,
+                                  skip_art, rename_tracks, strip_comments, log,
                                   skip_tagged=skip_tagged, keep_art=keep_art,
                                   do_strip_artist=strip_artist,
                                   rename_folders=rename_folders)
@@ -1561,8 +1560,8 @@ Examples:
   %(prog)s /path/to/music --genre Rock           # force genre
   %(prog)s /path/to/music --no-art               # skip album art
   %(prog)s /path/to/music --keep-art             # don't overwrite existing art
-  %(prog)s /path/to/music --rename               # also fix folder/file names
-  %(prog)s /path/to/music --rename --dry-run     # preview renames
+  %(prog)s /path/to/music --rename-tracks        # fix folder + track file names
+  %(prog)s /path/to/music --rename-tracks --dry-run  # preview renames
   %(prog)s /path/to/music --skip-tagged          # skip already-tagged files
   %(prog)s /path/to/music --filter "Radiohead"   # process one artist only
   %(prog)s /path/to/music --strip-comments       # remove ID3 comments
@@ -1585,9 +1584,9 @@ Examples:
                         help='Skip fetching album cover art')
     parser.add_argument('--keep-art', action='store_true',
                         help='Preserve existing embedded cover art (don\'t overwrite)')
-    parser.add_argument('--rename', action='store_true',
-                        help='Rename album folders to [YEAR] Album Name format and '
-                             'track files to "NN - Title.ext" using MusicBrainz data')
+    parser.add_argument('--rename-tracks', action='store_true',
+                        help='Rename track files to "NN - Title.ext" format using '
+                             'MusicBrainz track numbers (also renames album folders)')
     parser.add_argument('--skip-tagged', action='store_true',
                         help='Skip files that already have complete tags '
                              '(title, artist, album, track number, year)')
@@ -1621,7 +1620,7 @@ Examples:
     args = parser.parse_args()
     scan_and_process(
         args.directory, args.genre, args.dry_run, args.no_art,
-        rename=args.rename, strip_comments=args.strip_comments,
+        rename_tracks=args.rename_tracks, strip_comments=args.strip_comments,
         output_file=args.output, filter_str=args.filter_str,
         skip_tagged=args.skip_tagged, keep_art=args.keep_art,
         confirm=args.confirm, organize=args.organize,

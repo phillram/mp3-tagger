@@ -50,7 +50,7 @@ pip3 install mutagen musicbrainzngs
 
 **Artist folders** should be named as the artist appears on MusicBrainz. If the spelling is slightly off, the script detects the canonical name and uses it in the tags.
 
-**Album folders** are parsed flexibly — all of the following formats are recognised and will be normalised to `[YEAR] Album Name` when using `--rename` or `--rename-folders`:
+**Album folders** are parsed flexibly — all of the following formats are recognised and will be normalised to `[YEAR] Album Name` when using `--rename-tracks` or `--rename-folders`:
 
 | Format | Example |
 |--------|---------|
@@ -101,17 +101,16 @@ Runs a full dry-run preview, then asks `Apply these changes? [y/N]` before proce
 
 ### Renaming
 
-#### Rename folders and track files
+#### Rename track files (and folders)
 
 ```bash
-python3 tag_mp3s.py /path/to/music --rename
-python3 tag_mp3s.py /path/to/music --rename --dry-run
+python3 tag_mp3s.py /path/to/music --rename-tracks
+python3 tag_mp3s.py /path/to/music --rename-tracks --dry-run
 ```
 
+- Renames track files to `NN - Original Title.ext` — the track number comes from MusicBrainz, but the title is always kept from the original filename so it is never substituted with a different title
 - Renames album folders to `[YEAR] Album Name` using the canonical title and year from MusicBrainz
-- Renames track files to `NN - Track Title.ext` using verified MusicBrainz track titles
 - Normalises all dashes to standard hyphens — en-dashes, em-dashes, and other Unicode dash variants are replaced automatically
-- Preserves trailing suffixes from the original filename (e.g. `(2002 Remaster)`) that aren't in the MusicBrainz title
 - Also applies all metadata tags
 
 #### Rename folders only
@@ -121,7 +120,7 @@ python3 tag_mp3s.py /path/to/music --rename-folders
 python3 tag_mp3s.py /path/to/music --rename-folders --dry-run
 ```
 
-Same as `--rename` but leaves individual track filenames untouched. Useful when you want standardised folder names but prefer to keep your original track filenames.
+Renames album folders to `[YEAR] Album Name` without touching individual track filenames. Useful when you want standardised folder names but prefer to keep your original track filenames.
 
 ---
 
@@ -282,7 +281,7 @@ Writes a CSV file with one row per action. Works with all other flags — in `--
 python3 tag_mp3s.py /path/to/music --filter "Radiohead" --dry-run
 
 # Tag and rename everything, confirm before applying
-python3 tag_mp3s.py /path/to/music --rename --confirm
+python3 tag_mp3s.py /path/to/music --rename-tracks --confirm
 
 # Re-run on a partially tagged library — skip completed files
 python3 tag_mp3s.py /path/to/music --skip-tagged
@@ -291,13 +290,13 @@ python3 tag_mp3s.py /path/to/music --skip-tagged
 python3 tag_mp3s.py /path/to/music --rename-folders --skip-tagged
 
 # Full cleanup: rename, strip junk comments, skip completed files
-python3 tag_mp3s.py /path/to/music --rename --strip-comments --skip-tagged
+python3 tag_mp3s.py /path/to/music --rename-tracks --strip-comments --skip-tagged
 
 # Strip artist prefix from filenames, preview first
 python3 tag_mp3s.py /path/to/music --strip-artist --dry-run
 
 # Organize loose files, then rename and tag everything
-python3 tag_mp3s.py /path/to/music --organize --rename --confirm
+python3 tag_mp3s.py /path/to/music --organize --rename-tracks --confirm
 
 # Organize with all release types visible (EPs, Live, etc.)
 python3 tag_mp3s.py /path/to/music --organize --all-release-types
@@ -321,7 +320,7 @@ python3 tag_mp3s.py /path/to/music --keep-art --skip-tagged --output report.csv
 | `--dry-run` | Preview all changes without modifying any files |
 | `--confirm` | Show a dry-run preview, then ask before applying |
 | `--filter TEXT` | Only process artists/albums matching this text (case-insensitive) |
-| `--rename` | Rename album folders to `[YEAR] Album` and track files to `NN - Title.ext` |
+| `--rename-tracks` | Rename track files to `NN - Title.ext` using MusicBrainz track numbers (title kept from original filename); also renames album folders to `[YEAR] Album` |
 | `--rename-folders` | Rename album folders to `[YEAR] Album` without renaming track files |
 | `--organize` | Interactively sort loose files into album subfolders using MusicBrainz |
 | `--all-release-types` | Include EPs, Live, and all other release types in `--organize` results (default: Albums, Singles, Compilations only) |
