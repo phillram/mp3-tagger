@@ -4,50 +4,33 @@ A Python script that automatically tags audio files (MP3, FLAC, M4A) with metada
 
 ## Features
 
-- **Multi-format support** — tags MP3 (ID3v2.4), FLAC (Vorbis comments), and M4A/MP4/AAC files
-- **Automatic metadata lookup** — searches MusicBrainz by artist name and album to find verified track titles, disc numbers, genres, labels, and release dates
-- **Fuzzy matching** — if an exact album name search fails, automatically strips common suffixes like "Deluxe Edition", "Remastered", etc. and retries
-- **Artist name correction** — detects and corrects misspelled artist names using the canonical spelling from MusicBrainz (e.g. `Rhianna` -> `Rihanna`)
-- **Album cover art** — downloads front cover art from the Cover Art Archive and embeds it in each file
-- **Preserve existing art** — `--keep-art` prevents overwriting cover art that's already embedded
-- **Multi-disc support** — automatically detects `CD1/`, `CD2/`, `Disc 1/`, etc. subfolders within album directories and maps tracks to the correct disc
-- **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.ext`. Edition suffixes like "(Deluxe Edition)" in folder names are preserved. Track suffixes like "(2002 Remaster)" in filenames are also preserved
-- **Folder-only renaming** — `--rename-folders` renames album folders to `[YEAR] Album Name` format without touching track filenames
-- **Organize loose files** — `--organize` fetches the artist's full discography from MusicBrainz, looks up each loose file by recording, and presents a numbered album list sorted by year (oldest first). Recording matches are marked with `*`. You always choose the album, even if only one match is found. By default only studio albums, singles, and EPs are shown; use `--include-compilations` to also see compilations
-- **Organize report** — `--organize-report FILE` surveys loose files via MusicBrainz and writes a text report of album groupings and unmatched files without moving anything
-- **Strip artist from filenames** — `--strip-artist` removes the artist name prefix from track filenames (e.g. `Styx - Lady.mp3` becomes `Lady.mp3`)
-- **Hyphen normalization** — automatically replaces en-dashes, em-dashes, and other Unicode dash characters with standard hyphens (`-`) in all renamed folders and filenames
-- **Strip comments** — optionally remove all comment (COMM) frames from ID3 tags, useful for cleaning out ripping software notes, encoder info, or other junk text
-- **Skip already-tagged** — `--skip-tagged` skips files that already have complete tags (including genre and cover art), saving time on re-runs. When all files in an album are already tagged, the MusicBrainz lookup is skipped entirely for faster processing
-- **Filter by artist/album** — `--filter` processes only matching artists or albums in a large library
-- **Confirmation mode** — `--confirm` shows a full preview and asks for approval before making changes
-- **Output report** — generate a CSV report of all changes: previous paths, new paths, tagged files, and any skipped files
-- **Summary stats** — prints a summary at the end showing counts for artists, albums, files tagged, MusicBrainz matches/misses, renames, and skips
-- **Error resilience** — files that can't be written (e.g. locked or read-only) are skipped with a warning instead of stopping the entire run
-- **Retry on errors** — automatically retries MusicBrainz API calls on transient network errors (503, 429, timeouts) with exponential backoff
-- **Dry-run mode** — preview all changes before anything is modified
-- **Genre override** — force a specific genre across all albums
+- Tags MP3 (ID3v2.4), FLAC (Vorbis comments), and M4A/MP4/AAC files
+- Looks up verified track titles, disc numbers, genres, labels, release dates, and cover art from MusicBrainz
+- Corrects misspelled artist names using MusicBrainz canonical spellings (e.g. `Rhianna` → `Rihanna`)
+- Fuzzy album matching — strips common suffixes like "Deluxe Edition" or "Remastered" and retries if an exact search fails
+- Multi-disc support — auto-detects `CD1/`, `CD2/`, `Disc 1/`, etc. subfolders and maps tracks to the correct disc
+- Renames album folders to `[YEAR] Album Name` and track files to `NN - Title.ext` using MusicBrainz data
+- Organizes loose files — fetches the full artist discography, lets you interactively pick the right album, then creates subfolders and moves files
+- Dry-run mode — preview all changes before anything is modified
+- Confirmation mode — full preview with a yes/no prompt before applying
+- Resilient — locked or read-only files are skipped with a warning rather than stopping the run
 
 ## Requirements
 
 - Python 3.10+
-- Two Python packages: `mutagen` and `musicbrainzngs`
-
-Install via the requirements file:
+- `mutagen` and `musicbrainzngs`
 
 ```bash
 pip3 install -r requirements.txt
 ```
 
-Or if that doesn't work, install them directly:
+Or directly:
 
 ```bash
 pip3 install mutagen musicbrainzngs
 ```
 
 ## Expected Folder Structure
-
-The script expects your music to be organised as:
 
 ```
 /music-root/
@@ -57,62 +40,48 @@ The script expects your music to be organised as:
       02 - Track Two.flac
     [2020] Another Album/
       01. First Song.m4a
-      02. Second Song.m4a
   Another Artist/
     [1997] Their Album/
       CD1/
         01 Intro.mp3
-        02 Track Two.mp3
       CD2/
         01 Bonus Track.mp3
 ```
 
-If some of your artists have loose files without album subfolders (e.g. `Artist/01 - Song.mp3`), use `--organize` to interactively sort them into album folders using MusicBrainz lookups, or `--organize-report FILE` to survey the matches first without moving anything.
+**Artist folders** should be named as the artist appears on MusicBrainz. If the spelling is slightly off, the script detects the canonical name and uses it in the tags.
 
-**Artist folders** should be named as the artist appears on MusicBrainz (e.g. `Radiohead`, `Kendrick Lamar`). If the name is slightly wrong, the script will detect the canonical spelling from MusicBrainz and use it in the tags (with a note in the output).
+**Album folders** are parsed flexibly — all of the following formats are recognised and will be normalised to `[YEAR] Album Name` when using `--rename` or `--rename-folders`:
 
-**Album folders** are parsed flexibly — all of the following formats are understood and will be correctly renamed to `[YEAR] Album Name` when using `--rename`:
+| Format | Example |
+|--------|---------|
+| `[YEAR] Album Name` *(preferred)* | `[1994] The Downward Spiral` |
+| `(YEAR) Album Name` | `(1994) The Downward Spiral` |
+| `YEAR - Album Name` | `1994 - The Downward Spiral` |
+| `YEAR Album Name` | `1994 The Downward Spiral` |
+| `Album Name (YEAR)` | `The Downward Spiral (1994)` |
+| `Album Name [YEAR]` | `The Downward Spiral [1994]` |
+| `Album Name` *(no year)* | `The Downward Spiral` |
 
-Year at the start:
-- `[2024] Album Name` (preferred/target format)
-- `(2024) Album Name`
-- `2024 - Album Name`
-- `2024 Album Name`
+Edition suffixes like `(Deluxe Edition)` or `(Remastered)` are preserved in folder and file names even when MusicBrainz doesn't include them.
 
-Year at the end:
-- `Album Name (2024)`
-- `Album Name [2024]`
-- `Album Name - 2024`
-
-No year:
-- `Album Name` (year will be looked up from MusicBrainz)
-
-**Multi-disc albums** are supported via subfolders named `CD1`, `CD2`, `Disc 1`, `Disc 2`, `Disk1`, etc. (case-insensitive). Tracks inside these subfolders are automatically mapped to the correct disc number from MusicBrainz.
-
-**Track filenames** are parsed for the track number. These formats work:
+**Track filenames** are parsed for track number using these formats:
 - `01 - Track Name.mp3`
 - `01. Track Name.flac`
 - `01 Track Name.m4a`
 
-**Supported audio formats:** MP3 (.mp3), FLAC (.flac), M4A/MP4/AAC (.m4a, .mp4, .aac)
+**Supported audio formats:** MP3, FLAC, M4A/MP4/AAC
 
 ## Usage
 
-### Preview changes (recommended first step)
+### First run — preview changes
+
+Always start with a dry run to verify the MusicBrainz matches look right:
 
 ```bash
 python3 tag_mp3s.py /path/to/music --dry-run
 ```
 
-This shows exactly what would be changed without modifying any files. Always run this first to verify the MusicBrainz matches are correct.
-
-### Confirm before applying
-
-```bash
-python3 tag_mp3s.py /path/to/music --confirm
-```
-
-Runs a full dry-run preview, then asks `Apply these changes? [y/N]` before proceeding. A good middle ground between `--dry-run` and applying immediately.
+No files are modified. The output shows exactly what would be changed.
 
 ### Apply metadata tags
 
@@ -120,86 +89,82 @@ Runs a full dry-run preview, then asks `Apply these changes? [y/N]` before proce
 python3 tag_mp3s.py /path/to/music
 ```
 
-### Filter by artist or album
+### Preview then confirm before applying
 
 ```bash
-python3 tag_mp3s.py /path/to/music --filter "Radiohead"
-python3 tag_mp3s.py /path/to/music --filter "OK Computer"
+python3 tag_mp3s.py /path/to/music --confirm
 ```
 
-Only processes artists or albums whose name contains the given text (case-insensitive). Useful for large libraries when you only want to tag one artist or album.
+Runs a full dry-run preview, then asks `Apply these changes? [y/N]` before proceeding. A good middle ground between `--dry-run` and applying immediately.
 
-### Rename folders and files to standard format
+---
+
+### Renaming
+
+#### Rename folders and track files
 
 ```bash
 python3 tag_mp3s.py /path/to/music --rename
-```
-
-This will:
-- Rename album folders to `[YEAR] Album Name` format using the canonical album title and year from MusicBrainz
-- Rename track files to `NN - Track Title.ext` format using the verified track titles from MusicBrainz
-- Normalize all dashes to standard hyphens (`-`) — en-dashes, em-dashes, and other Unicode dash variants are replaced automatically
-- Also apply all metadata tags
-
-Use with `--dry-run` to preview renames first:
-
-```bash
 python3 tag_mp3s.py /path/to/music --rename --dry-run
 ```
 
-### Rename folders only (without renaming track files)
+- Renames album folders to `[YEAR] Album Name` using the canonical title and year from MusicBrainz
+- Renames track files to `NN - Track Title.ext` using verified MusicBrainz track titles
+- Normalises all dashes to standard hyphens — en-dashes, em-dashes, and other Unicode dash variants are replaced automatically
+- Preserves trailing suffixes from the original filename (e.g. `(2002 Remaster)`) that aren't in the MusicBrainz title
+- Also applies all metadata tags
+
+#### Rename folders only
 
 ```bash
 python3 tag_mp3s.py /path/to/music --rename-folders
 python3 tag_mp3s.py /path/to/music --rename-folders --dry-run
 ```
 
-Renames album folders to `[YEAR] Album Name` format using the canonical album title and year from MusicBrainz, but does not rename individual track files. Also applies all metadata tags. Useful when you want standardized folder names but prefer to keep your original track filenames.
+Same as `--rename` but leaves individual track filenames untouched. Useful when you want standardised folder names but prefer to keep your original track filenames.
 
-### Organize loose files into album folders
+---
+
+### Organizing Loose Files
+
+If audio files are found directly in an artist folder (e.g. `Artist/Song.mp3` instead of `Artist/[YEAR] Album/Song.mp3`), use `--organize` to sort them into album subfolders.
+
+#### Interactively organize loose files
 
 ```bash
 python3 tag_mp3s.py /path/to/music --organize
-```
-
-If audio files are found directly in an artist folder (e.g. `Radiohead/Karma Police.mp3` instead of `Radiohead/[1997] OK Computer/Karma Police.mp3`), `--organize` will:
-
-1. Fetch the artist's full discography from MusicBrainz (studio albums, singles, EPs)
-2. Look up each track by recording to find which albums it appears on
-3. Present a numbered list of all albums sorted by year (oldest first), with recording matches marked with `*`
-4. Ask you to pick the correct album (default is 1, enter 0 to skip)
-5. Group the files by your selected albums
-6. Create `[YEAR] Album Name` subfolders
-7. Move the files into the correct album folders
-8. Then continue with normal tagging on the newly created albums
-
-By default, only studio albums, singles, and EPs are shown. Use `--include-compilations` to also show compilations and other album types:
-
-```bash
-python3 tag_mp3s.py /path/to/music --organize --include-compilations
-```
-
-Use with `--dry-run` to preview what would happen:
-
-```bash
 python3 tag_mp3s.py /path/to/music --organize --dry-run
 ```
 
+For each loose file, `--organize` will:
+
+1. Fetch the artist's discography from MusicBrainz (Albums, Singles, and Compilations by default)
+2. Look up the recording to find which albums it appears on — those matches are marked with `*`
+3. Present a numbered list of albums grouped by type (Albums → Singles → Compilations), sorted oldest first within each group
+4. Ask you to pick the correct album (press Enter for option 1, or enter `0` to skip the file)
+5. Create `[YEAR] Album Name` subfolders and move the files into them
+6. Continue with normal tagging on the newly organised albums
+
 Files that can't be matched to any album on MusicBrainz are left in place and logged as skipped.
 
-### Survey loose files without moving them
+#### Include all release types
+
+```bash
+python3 tag_mp3s.py /path/to/music --organize --all-release-types
+```
+
+By default `--organize` only shows Albums, Singles, and Compilations. Use `--all-release-types` to also include EPs, Live releases, and any other type in the list.
+
+#### Survey loose files without moving them
 
 ```bash
 python3 tag_mp3s.py /path/to/music --organize-report report.txt
+python3 tag_mp3s.py /path/to/music --organize-report report.txt --filter "Artist Name"
 ```
 
-If you want to review the album groupings before actually organizing, `--organize-report` will:
+Non-interactive survey mode — looks up each loose file on MusicBrainz, auto-picks the first result, and writes a text report of the proposed album groupings. **No files are moved or folders created.** Useful for reviewing matches before committing to `--organize`.
 
-1. Look up each loose file on MusicBrainz (non-interactive, auto-picks the first result)
-2. Write a text report listing each artist, their matched albums in `[YEAR] Album Name` format, and any unmatched files
-3. **No files are moved or folders created** — this is a read-only survey
-
-The output file looks like:
+Output format:
 
 ```
 === Artist Name ===
@@ -214,69 +179,90 @@ Albums:
     - Ghost Opera.mp3
 ```
 
-Use `--filter` to limit the survey to specific artists:
+---
+
+### Filtering and Skipping
+
+#### Filter by artist or album
 
 ```bash
-python3 tag_mp3s.py /path/to/music --organize-report report.txt --filter "Radiohead"
+python3 tag_mp3s.py /path/to/music --filter "Radiohead"
+python3 tag_mp3s.py /path/to/music --filter "OK Computer"
 ```
 
-### Skip already-tagged files
+Only processes artists or albums whose name contains the given text (case-insensitive). Useful for large libraries when you only want to process one artist or album at a time.
+
+#### Skip already-tagged files
 
 ```bash
 python3 tag_mp3s.py /path/to/music --skip-tagged
 ```
 
-Skips files that already have complete tags (title, artist, album, track number, year, genre, and cover art). If every file in an album is already fully tagged, the MusicBrainz lookup is skipped entirely — no API calls are made for that album, which significantly speeds up re-runs on large libraries. Useful for re-running the script on a library that's partially tagged — only untagged or incomplete files will be processed.
+Skips files that already have a complete set of tags: title, artist, album, track number, year, genre, and cover art. If every file in an album is already fully tagged, the MusicBrainz lookup is skipped entirely — no API calls are made for that album, which significantly speeds up re-runs on large libraries.
 
-### Override genre
+---
 
-```bash
-python3 tag_mp3s.py /path/to/music --genre "Rock"
-```
-
-By default, genre is pulled from MusicBrainz community tags. Use `--genre` to force a specific genre across all albums.
-
-### Skip album art / preserve existing art
+### Cover Art
 
 ```bash
 python3 tag_mp3s.py /path/to/music --no-art
 python3 tag_mp3s.py /path/to/music --keep-art
 ```
 
-- `--no-art` skips downloading and embedding cover art entirely. Useful for faster runs or if you manage album art separately.
-- `--keep-art` downloads new art from MusicBrainz but only embeds it in files that don't already have cover art. Files with existing art are left untouched.
+- `--no-art` — skips downloading and embedding cover art entirely. Useful for faster runs or if you manage art separately.
+- `--keep-art` — downloads new art from MusicBrainz but only embeds it in files that don't already have cover art. Files with existing art are left untouched.
 
-### Strip comments
+By default, cover art is always downloaded and overwrites any existing embedded art.
 
-```bash
-python3 tag_mp3s.py /path/to/music --strip-comments
-```
+---
 
-Removes all comment (COMM) frames from the ID3 tags on each MP3. These often contain junk text left by ripping software, encoders, or download tools (e.g. "Ripped with EAC", "Downloaded from...", encoder settings). Works with `--dry-run` to preview which files have comments before removing them.
+### Cleaning Up Filenames and Tags
 
-### Strip artist name from filenames
+#### Remove artist name prefix from filenames
 
 ```bash
 python3 tag_mp3s.py /path/to/music --strip-artist
 python3 tag_mp3s.py /path/to/music --strip-artist --dry-run
 ```
 
-Removes the artist name prefix from track filenames. Useful when files are named `Artist - Song Title.mp3` and you want just `Song Title.mp3` (or `01 Song Title.mp3` if a track number is present). Works with `--dry-run` to preview renames first.
+Removes the artist name prefix from track filenames. For example:
+- `Styx - Lady.mp3` → `Lady.mp3`
+- `01 Styx - Lady.mp3` → `01 Lady.mp3`
 
-### Generate an output report
+#### Remove comment tags
+
+```bash
+python3 tag_mp3s.py /path/to/music --strip-comments
+```
+
+Removes all comment (`COMM`) frames from MP3 ID3 tags. These often contain junk left by ripping software or download tools (e.g. "Ripped with EAC", encoder settings). Use with `--dry-run` to preview which files have comments before removing them.
+
+---
+
+### Override Genre
+
+```bash
+python3 tag_mp3s.py /path/to/music --genre "Rock"
+```
+
+Forces a specific genre across all albums. By default, genre is pulled from MusicBrainz community tags.
+
+---
+
+### Output Report
 
 ```bash
 python3 tag_mp3s.py /path/to/music --output report.csv
 ```
 
-Writes a CSV file with one row per action. Columns include:
+Writes a CSV file with one row per action. Works with all other flags — in `--dry-run` mode, statuses show as `would_tag`/`would_rename` instead of `tagged`/`renamed`.
 
 | Column | Description |
 |--------|-------------|
 | `type` | `file` or `folder` |
 | `status` | `tagged`, `renamed`, `skipped`, `would_tag`, `would_rename` |
-| `reason` | Why a file was skipped (empty if not skipped) |
-| `previous_path` | Original full path before any changes |
+| `reason` | Why a file was skipped (empty otherwise) |
+| `previous_path` | Full path before any changes |
 | `new_path` | Path after rename (same as previous if not renamed) |
 | `artist` | Artist name applied |
 | `album` | Album name applied |
@@ -287,85 +273,117 @@ Writes a CSV file with one row per action. Columns include:
 | `has_cover` | Whether cover art was embedded |
 | `mb_matched` | Whether MusicBrainz found a match |
 
-Works with all other flags including `--dry-run` (statuses will show `would_tag`/`would_rename` instead).
+---
 
-### Combine options
+### Common Combinations
 
 ```bash
-python3 tag_mp3s.py /path/to/music --rename --genre "Electronic" --dry-run
-python3 tag_mp3s.py /path/to/music --rename --output report.csv
-python3 tag_mp3s.py /path/to/music --rename --strip-comments --skip-tagged
-python3 tag_mp3s.py /path/to/music --filter "Radiohead" --rename --confirm
-python3 tag_mp3s.py /path/to/music --keep-art --skip-tagged --output report.csv
-python3 tag_mp3s.py /path/to/music --strip-artist --rename --dry-run
+# Tag a single artist with a dry-run preview first
+python3 tag_mp3s.py /path/to/music --filter "Radiohead" --dry-run
+
+# Tag and rename everything, confirm before applying
+python3 tag_mp3s.py /path/to/music --rename --confirm
+
+# Re-run on a partially tagged library — skip completed files
+python3 tag_mp3s.py /path/to/music --skip-tagged
+
+# Rename folders only, skip already-complete albums
 python3 tag_mp3s.py /path/to/music --rename-folders --skip-tagged
+
+# Full cleanup: rename, strip junk comments, skip completed files
+python3 tag_mp3s.py /path/to/music --rename --strip-comments --skip-tagged
+
+# Strip artist prefix from filenames, preview first
+python3 tag_mp3s.py /path/to/music --strip-artist --dry-run
+
+# Organize loose files, then rename and tag everything
 python3 tag_mp3s.py /path/to/music --organize --rename --confirm
-python3 tag_mp3s.py /path/to/music --organize --include-compilations
+
+# Organize with all release types visible (EPs, Live, etc.)
+python3 tag_mp3s.py /path/to/music --organize --all-release-types
+
+# Survey loose files for one artist before organizing
 python3 tag_mp3s.py /path/to/music --organize-report survey.txt --filter "Radiohead"
+
+# Tag with a genre override and save a change report
+python3 tag_mp3s.py /path/to/music --genre "Electronic" --output report.csv
+
+# Keep existing art, skip tagged files, save report
+python3 tag_mp3s.py /path/to/music --keep-art --skip-tagged --output report.csv
 ```
+
+---
 
 ## All Options
 
 | Flag | Description |
 |------|-------------|
-| `--dry-run` | Preview changes without modifying files |
-| `--confirm` | Preview changes, then ask before applying |
-| `--rename` | Rename folders to `[YEAR] Album` and files to `NN - Title.ext` (preserves track suffixes) |
+| `--dry-run` | Preview all changes without modifying any files |
+| `--confirm` | Show a dry-run preview, then ask before applying |
+| `--filter TEXT` | Only process artists/albums matching this text (case-insensitive) |
+| `--rename` | Rename album folders to `[YEAR] Album` and track files to `NN - Title.ext` |
 | `--rename-folders` | Rename album folders to `[YEAR] Album` without renaming track files |
+| `--organize` | Interactively sort loose files into album subfolders using MusicBrainz |
+| `--all-release-types` | Include EPs, Live, and all other release types in `--organize` results (default: Albums, Singles, Compilations only) |
+| `--organize-report FILE` | Survey loose files and write a text report without moving anything |
+| `--skip-tagged` | Skip files that already have complete tags; skips MusicBrainz lookup if all files in an album are tagged |
 | `--genre TEXT` | Override genre for all albums |
-| `--no-art` | Skip fetching album cover art |
-| `--keep-art` | Don't overwrite existing embedded cover art |
-| `--skip-tagged` | Skip files with complete tags (including genre and cover art); skips MusicBrainz lookup when all files are tagged |
-| `--filter TEXT` | Only process matching artists/albums |
-| `--strip-comments` | Remove ID3 comment frames |
+| `--no-art` | Skip downloading and embedding cover art |
+| `--keep-art` | Only embed art in files that don't already have it |
 | `--strip-artist` | Remove artist name prefix from track filenames |
-| `--organize` | Interactively sort loose files into album subfolders (shows full discography) |
-| `--include-compilations` | Include compilations and other album types in `--organize` results |
-| `--organize-report FILE` | Survey loose files and write a text report (no files moved) |
+| `--strip-comments` | Remove all comment (COMM) frames from MP3 ID3 tags |
 | `--output FILE` | Write a CSV report of all changes |
+
+---
 
 ## What Gets Tagged
 
-Each audio file receives the following tags (format-appropriate):
+Each audio file receives the following tags (in the format-appropriate field):
 
-| Tag | MP3 (ID3) | FLAC (Vorbis) | M4A (MP4) | Source |
-|-----|-----------|---------------|-----------|--------|
-| Song title | TIT2 | title | \xa9nam | MusicBrainz recording title, falls back to filename |
-| Artist | TPE1 | artist | \xa9ART | MusicBrainz canonical artist name |
-| Album artist | TPE2 | albumartist | aART | MusicBrainz canonical artist name |
-| Album | TALB | album | \xa9alb | MusicBrainz release title |
-| Track number | TRCK | tracknumber | trkn | MusicBrainz (e.g. `3/12`), falls back to filename |
-| Disc number | TPOS | discnumber | disk | MusicBrainz (e.g. `1/2`) |
-| Year/date | TDRC | date | \xa9day | MusicBrainz release date, falls back to folder name |
-| Genre | TCON | genre | \xa9gen | MusicBrainz community tags, or `--genre` override |
-| Label/publisher | TPUB | organization | — | MusicBrainz label info |
-| Cover art | APIC | PICTURE | covr | Cover Art Archive (front cover, 500px) |
+| Tag | MP3 (ID3v2.4) | FLAC (Vorbis) | M4A (MP4) | Source |
+|-----|---------------|---------------|-----------|--------|
+| Song title | `TIT2` | `title` | `©nam` | MusicBrainz recording title, falls back to filename |
+| Artist | `TPE1` | `artist` | `©ART` | MusicBrainz canonical artist name |
+| Album artist | `TPE2` | `albumartist` | `aART` | MusicBrainz canonical artist name |
+| Album | `TALB` | `album` | `©alb` | MusicBrainz release title |
+| Track number | `TRCK` | `tracknumber` | `trkn` | MusicBrainz (e.g. `3/12`), falls back to filename |
+| Disc number | `TPOS` | `discnumber` | `disk` | MusicBrainz (e.g. `1/2`) |
+| Year | `TDRC` | `date` | `©day` | MusicBrainz release date, falls back to folder name |
+| Genre | `TCON` | `genre` | `©gen` | MusicBrainz community tags, or `--genre` override |
+| Label | `TPUB` | `organization` | — | MusicBrainz label info |
+| Cover art | `APIC` | `PICTURE` | `covr` | Cover Art Archive (front cover) |
+
+---
 
 ## How It Works
 
-1. **Scan** — walks the directory tree looking for `Artist/Album/track` structure (including multi-disc subfolders)
-2. **Organize** (optional) — if `--organize` is set, looks up loose files via MusicBrainz recordings, creates album folders, and moves files in
-3. **Parse** — extracts artist name, album name, year, and track numbers from folder/file names
-4. **Search** — queries the MusicBrainz API to find the matching release, with fuzzy fallback
-5. **Correct** — uses canonical artist name and album title from MusicBrainz (preserving edition suffixes like "Deluxe Edition" in folder names)
-6. **Fetch** — pulls detailed track info, genre tags, label, and cover art
-7. **Match** — maps each file to its MusicBrainz track info in a single pass, ensuring consistent metadata for both renames and tags
-8. **Write** — applies tags to each audio file in the appropriate format
-9. **Rename** (optional) — renames folders and files to the canonical format
-10. **Report** — prints summary stats and optionally writes a CSV report
+1. **Scan** — walks the directory tree looking for `Artist/Album/track` structure, including multi-disc subfolders
+2. **Organize** *(optional)* — if `--organize` is set, fetches the artist's discography, lets you pick albums interactively, creates subfolders, and moves files before tagging
+3. **Parse** — extracts artist name, album name, year, and track numbers from folder and file names
+4. **Search** — queries the MusicBrainz API with fuzzy fallback (strips edition suffixes and retries if exact search fails)
+5. **Correct** — uses the canonical artist name and album title from MusicBrainz, preserving any edition suffixes from the original folder name
+6. **Fetch** — retrieves detailed track list, genre tags, label, and cover art from Cover Art Archive
+7. **Match** — maps each file to its MusicBrainz track info in a single pass, ensuring consistent metadata for both renaming and tagging
+8. **Rename** *(optional)* — renames folders and/or files to canonical format
+9. **Write** — applies tags to each audio file in the appropriate format
+10. **Report** — prints a summary and optionally writes a CSV report
+
+---
 
 ## Rate Limiting
 
-MusicBrainz requires a maximum of 1 request per second. The script automatically rate-limits itself, so processing a large library will take some time. This is expected and unavoidable. Transient errors (503, 429, timeouts) are automatically retried with exponential backoff.
+MusicBrainz allows a maximum of 1 request per second. The script enforces this automatically, so processing a large library takes time — this is expected. Transient errors (503, 429, timeouts) are retried automatically with exponential backoff.
+
+---
 
 ## Troubleshooting
 
-**"No MusicBrainz match found"** — The artist or album name didn't match anything. Check that the artist folder is spelled correctly. The script tries fuzzy matching by stripping common suffixes like "Deluxe Edition", but very different spellings won't match. Use `--filter` to isolate specific albums for debugging.
+**"No MusicBrainz match found"** — The artist or album name didn't match anything. Check that the artist folder name is spelled correctly. The script tries fuzzy matching (stripping suffixes like "Deluxe Edition"), but very different spellings won't match. Use `--filter` to isolate one artist or album for debugging.
 
-**Wrong album matched** — If MusicBrainz returns the wrong release (e.g. a remaster instead of the original), check the dry-run output. You may need to adjust the album folder name to be more specific.
+**Wrong album matched** — If MusicBrainz returns the wrong release (e.g. a remaster instead of the original), check the dry-run output. Adjusting the album folder name to be more specific (e.g. adding the year) usually resolves it.
 
-**"No cover art found"** — Not all releases have cover art on the Cover Art Archive. You can add art manually using any tag editor.
+**"No cover art found"** — Not all releases have art on the Cover Art Archive. You can add it manually using any tag editor.
 
-**Permission denied errors** — If a file is locked by another process (media player, file explorer preview, cloud sync) or marked read-only, the script will skip it with an error message and continue to the next file. Close any programs that might have the file open and re-run with `--skip-tagged` to process only the files that were missed.
+**Permission denied** — If a file is locked by another process (media player, cloud sync, file explorer preview) or marked read-only, it will be skipped with a warning. Close any programs that may have the file open and re-run with `--skip-tagged` to process only the files that were missed.
 
-**Rate limit errors** — If you see HTTP 503 errors, MusicBrainz is throttling you. The script handles this with automatic retries and built-in delays, but an extremely large library might occasionally hit limits. Use `--skip-tagged` on re-runs to avoid re-processing already-completed files.
+**Rate limit / 503 errors** — The script retries automatically, but an extremely large library can occasionally still hit limits. Use `--skip-tagged` on re-runs to avoid re-processing already-completed files.

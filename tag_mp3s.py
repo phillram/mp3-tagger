@@ -533,11 +533,14 @@ def _search_mb_recording_options(artist: str, title: str) -> list[dict]:
         return []
 
 
-def _fetch_artist_albums(artist: str, include_compilations: bool = False) -> list[dict]:
-    """Fetch all studio albums (and optionally compilations) for an artist from MusicBrainz.
+def _fetch_artist_albums(artist: str, all_release_types: bool = False) -> list[dict]:
+    """Fetch albums for an artist from MusicBrainz.
+
+    By default fetches Albums, Singles, and Compilations. Pass
+    all_release_types=True to fetch every type (EPs, Live, etc.).
 
     Returns a list of dicts with keys: album, year, release_id, release_type.
-    Results are sorted by year (oldest first).
+    Results are sorted by type then year (oldest first).
     """
     try:
         results = _mb_api_call(mb.search_artists, query=f'artist:"{artist}"', limit=5)
@@ -550,10 +553,10 @@ def _fetch_artist_albums(artist: str, include_compilations: bool = False) -> lis
         if not artist_id:
             return []
 
-        # Fetch release groups (albums, singles, EPs, and optionally compilations)
-        type_filter = ['album', 'single', 'ep']
-        if include_compilations:
-            type_filter.append('compilation')
+        # Fetch release groups
+        type_filter = ['album', 'single', 'compilation']
+        if all_release_types:
+            type_filter = []  # empty = no filter, returns all types
 
         offset = 0
         all_rgs: list[dict] = []
@@ -865,26 +868,25 @@ def find_audio_files(directory: Path) -> list[Path]:
 
 def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[Path],
                          dry_run: bool, log: list,
-                         include_compilations: bool = False) -> list[Path]:
+                         all_release_types: bool = False) -> list[Path]:
     """Organize loose audio files into album subfolders using MusicBrainz data.
 
     Interactive: always presents a numbered list of album options and asks the
-    user to choose.  The list includes all studio albums from the artist's
-    discography (fetched once upfront), with recording-specific matches marked
-    with an asterisk (*) and shown first.
+    user to choose.  The list includes albums from the artist's discography
+    (fetched once upfront), with recording-specific matches marked with *.
 
-    By default only studio albums, singles, and EPs are shown. Pass
-    include_compilations=True to also show compilations and other types.
+    By default shows Albums, Singles, and Compilations only. Pass
+    all_release_types=True to also show EPs, Live releases, and every other type.
 
-    All options are sorted by release year (oldest first).
+    Within each type, options are sorted by year (oldest first).
 
     Returns list of album directories that were created.
     """
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Organizing {len(audio_files)} loose file(s) for {artist_name}")
 
-    # Fetch full discography for this artist once
+    # Fetch discography for this artist once
     print(f"  Fetching discography for {artist_name}...")
-    all_artist_albums = _fetch_artist_albums(artist_name, include_compilations=include_compilations)
+    all_artist_albums = _fetch_artist_albums(artist_name, all_release_types=all_release_types)
     if all_artist_albums:
         print(f"  Found {len(all_artist_albums)} album(s) in discography")
     else:
@@ -901,10 +903,10 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
         # Search for this specific recording to find which albums it appears on
         recording_options = _search_mb_recording_options(artist_name, file_title)
 
-        # Filter out compilations/other unless --include-compilations
-        if not include_compilations:
+        # Filter to Album/Single/Compilation by default; include all types with --all-release-types
+        if not all_release_types:
             recording_options = [o for o in recording_options
-                                 if o.get('release_type', '').lower() in ('album', 'single', 'ep', '')]
+                                 if o.get('release_type', '').lower() in ('album', 'single', 'compilation', '')]
 
         # Build merged list: recording matches first (marked), then remaining artist albums
         recording_keys = {(o['album'].lower(), o.get('year')) for o in recording_options}
@@ -1299,7 +1301,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                      confirm: bool = False, organize: bool = False,
                      organize_report: str | None = None,
                      strip_artist: bool = False,
-                     include_compilations: bool = False,
+                     all_release_types: bool = False,
                      rename_folders: bool = False):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
@@ -1316,7 +1318,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                          skip_tagged=skip_tagged, keep_art=keep_art,
                          confirm=False, organize=organize,
                          organize_report=None, strip_artist=strip_artist,
-                         include_compilations=include_compilations,
+                         all_release_types=all_release_types,
                          rename_folders=rename_folders)
         print()
         try:
@@ -1384,7 +1386,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
             })
         elif direct_audio and organize:
             organize_loose_files(artist_name, artist_dir, direct_audio, dry_run, log,
-                                 include_compilations=include_compilations)
+                                 all_release_types=all_release_types)
             # Re-scan album dirs after organizing (new folders may have been created)
             if not dry_run:
                 album_dirs = sorted([d for d in artist_dir.iterdir() if d.is_dir()])
@@ -1566,7 +1568,7 @@ Examples:
   %(prog)s /path/to/music --strip-comments       # remove ID3 comments
   %(prog)s /path/to/music --strip-artist         # remove artist name from filenames
   %(prog)s /path/to/music --organize             # sort loose files into album folders
-  %(prog)s /path/to/music --organize --include-compilations  # include compilations
+  %(prog)s /path/to/music --organize --all-release-types    # include EPs, Live, etc.
   %(prog)s /path/to/music --organize-report r.txt # survey loose files without moving
   %(prog)s /path/to/music --rename-folders        # rename folders only (not tracks)
   %(prog)s /path/to/music --output report.csv    # generate output report
@@ -1605,10 +1607,10 @@ Examples:
     parser.add_argument('--organize-report', type=str, default=None, metavar='FILE',
                         help='Survey loose files via MusicBrainz and write a text report '
                              'of album groupings without moving any files')
-    parser.add_argument('--include-compilations', action='store_true',
-                        help='Include compilations and other album types in '
-                             '--organize results (by default only studio albums, '
-                             'singles, and EPs are shown)')
+    parser.add_argument('--all-release-types', action='store_true',
+                        help='Show all release types in --organize results '
+                             '(EPs, Live, etc.) — by default only Albums, '
+                             'Singles, and Compilations are shown)')
     parser.add_argument('--rename-folders', action='store_true',
                         help='Rename album folders to [YEAR] Album Name format '
                              'without renaming track files')
@@ -1625,7 +1627,7 @@ Examples:
         confirm=args.confirm, organize=args.organize,
         organize_report=args.organize_report,
         strip_artist=args.strip_artist,
-        include_compilations=args.include_compilations,
+        all_release_types=args.all_release_types,
         rename_folders=args.rename_folders,
     )
 
