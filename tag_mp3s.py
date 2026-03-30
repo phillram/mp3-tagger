@@ -259,7 +259,13 @@ def rename_track_files(file_to_track: dict[str, dict | None], dry_run: bool,
         mp3_path = Path(filepath_str)
         mb_title = track_info['title']
         track_num = track_info['track_num']
-        safe_title = sanitize_filename(mb_title)
+
+        # Preserve trailing parenthesized/bracketed suffixes from the original
+        # filename that aren't in the MusicBrainz title (e.g. "(2002 Remaster)")
+        _, original_title = parse_track_filename(mp3_path.name)
+        title_with_suffix = _preserve_album_suffix(original_title, mb_title)
+
+        safe_title = sanitize_filename(title_with_suffix)
         ext = mp3_path.suffix
         new_name = f"{track_num:02d} - {safe_title}{ext}"
 
@@ -531,6 +537,71 @@ def _search_mb_recording_options(artist: str, title: str) -> list[dict]:
         return []
 
 
+def _fetch_artist_albums(artist: str, include_compilations: bool = False) -> list[dict]:
+    """Fetch all studio albums (and optionally compilations) for an artist from MusicBrainz.
+
+    Returns a list of dicts with keys: album, year, release_id, release_type.
+    Results are sorted by year (oldest first).
+    """
+    try:
+        results = _mb_api_call(mb.search_artists, query=f'artist:"{artist}"', limit=5)
+        artist_list = results.get('artist-list', [])
+        if not artist_list:
+            return []
+
+        # Pick the best-matching artist
+        artist_id = artist_list[0].get('id')
+        if not artist_id:
+            return []
+
+        # Fetch release groups (albums, singles, EPs, and optionally compilations)
+        type_filter = ['album', 'single', 'ep']
+        if include_compilations:
+            type_filter.append('compilation')
+
+        offset = 0
+        all_rgs: list[dict] = []
+        while True:
+            rg_results = _mb_api_call(
+                mb.browse_release_groups,
+                artist=artist_id,
+                release_type=type_filter,
+                limit=100,
+                offset=offset,
+            )
+            rgs = rg_results.get('release-group-list', [])
+            if not rgs:
+                break
+            all_rgs.extend(rgs)
+            if len(all_rgs) >= int(rg_results.get('release-group-count', 0)):
+                break
+            offset += len(rgs)
+
+        albums: list[dict] = []
+        seen: set[str] = set()
+        for rg in all_rgs:
+            title = rg.get('title', '')
+            rg_type = rg.get('type', '')
+            year = rg.get('first-release-date', '')[:4] or None
+            key = title.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            albums.append({
+                'album': title,
+                'year': year,
+                'release_id': None,  # We don't have a specific release ID from release groups
+                'recording_title': None,
+                'release_type': rg_type,
+            })
+
+        albums.sort(key=lambda a: (a.get('year') or '9999'))
+        return albums
+    except mb.WebServiceError as e:
+        print(f"    WARNING: Could not fetch artist albums: {e}")
+        return []
+
+
 def get_release_group_info(release: dict) -> dict:
     """Extract genre/type info from the release group."""
     info = {}
@@ -794,16 +865,31 @@ def find_audio_files(directory: Path) -> list[Path]:
 
 
 def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[Path],
-                         dry_run: bool, log: list) -> list[Path]:
+                         dry_run: bool, log: list,
+                         include_compilations: bool = False) -> list[Path]:
     """Organize loose audio files into album subfolders using MusicBrainz data.
 
-    Interactive: presents album options and lets the user choose for each file.
-    If only one option is found it is auto-selected; if multiple are found the
-    user picks from a numbered list (0 = skip).
+    Interactive: always presents a numbered list of album options and asks the
+    user to choose.  The list includes all studio albums from the artist's
+    discography (fetched once upfront), with recording-specific matches marked
+    with an asterisk (*) and shown first.
+
+    By default only studio albums, singles, and EPs are shown. Pass
+    include_compilations=True to also show compilations and other types.
+
+    All options are sorted by release year (oldest first).
 
     Returns list of album directories that were created.
     """
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Organizing {len(audio_files)} loose file(s) for {artist_name}")
+
+    # Fetch full discography for this artist once
+    print(f"  Fetching discography for {artist_name}...")
+    all_artist_albums = _fetch_artist_albums(artist_name, include_compilations=include_compilations)
+    if all_artist_albums:
+        print(f"  Found {len(all_artist_albums)} album(s) in discography")
+    else:
+        print(f"  Could not fetch discography — will rely on recording searches only")
 
     # Group files by album using interactive MusicBrainz recording lookups
     album_groups: dict[tuple, dict] = {}
@@ -813,44 +899,69 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
         _, file_title = parse_track_filename(audio_path.name)
         print(f"  Looking up: {file_title}")
 
-        options = _search_mb_recording_options(artist_name, file_title)
+        # Search for this specific recording to find which albums it appears on
+        recording_options = _search_mb_recording_options(artist_name, file_title)
+
+        # Filter out compilations/other unless --include-compilations
+        if not include_compilations:
+            recording_options = [o for o in recording_options
+                                 if o.get('release_type', '').lower() in ('album', 'single', 'ep', '')]
+
+        # Build merged list: recording matches first (marked), then remaining artist albums
+        recording_keys = {(o['album'].lower(), o.get('year')) for o in recording_options}
+
+        # Mark recording matches
+        for o in recording_options:
+            o['_matched'] = True
+
+        # Add remaining artist albums that weren't in the recording results
+        remaining = []
+        for a in all_artist_albums:
+            key = (a['album'].lower(), a.get('year'))
+            if key not in recording_keys:
+                entry = dict(a)
+                entry['_matched'] = False
+                remaining.append(entry)
+
+        # Combine: recording matches first, then rest of discography
+        options = recording_options + remaining
+
+        # Sort all options by year (oldest first), with unknown years at the end
+        options.sort(key=lambda o: (o.get('year') or '9999'))
+
         if not options:
             print(f"    No album found")
             unmatched.append(audio_path)
             continue
 
-        # Select an album option
-        if len(options) == 1:
-            selected = options[0]
-            rtype = f" [{selected.get('release_type')}]" if selected.get('release_type') else ''
-            print(f"    -> {selected['album']} ({selected.get('year', '?')}){rtype}")
+        # Always show numbered list and ask user to choose
+        print(f"    Album options:")
+        for i, opt in enumerate(options, 1):
+            rtype = f" [{opt.get('release_type')}]" if opt.get('release_type') else ''
+            match_marker = ' *' if opt.get('_matched') else ''
+            print(f"      {i}. ({opt.get('year', '?')}) {opt['album']}{rtype}{match_marker}")
+        print(f"      0. Skip this file")
+        try:
+            choice = input(f"    Select [1]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n    Skipping remaining files.")
+            unmatched.append(audio_path)
+            break
+        if choice == '0':
+            print(f"    Skipped")
+            unmatched.append(audio_path)
+            continue
+        if choice == '':
+            idx = 0
         else:
-            print(f"    Found {len(options)} album options:")
-            for i, opt in enumerate(options, 1):
-                rtype = f" [{opt.get('release_type')}]" if opt.get('release_type') else ''
-                print(f"      {i}. {opt['album']} ({opt.get('year', '?')}){rtype}")
-            print(f"      0. Skip this file")
             try:
-                choice = input(f"    Select [1]: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\n    Skipping remaining files.")
-                unmatched.append(audio_path)
-                break
-            if choice == '0':
-                print(f"    Skipped")
-                unmatched.append(audio_path)
-                continue
-            if choice == '':
+                idx = int(choice) - 1
+            except ValueError:
                 idx = 0
-            else:
-                try:
-                    idx = int(choice) - 1
-                except ValueError:
-                    idx = 0
-            if idx < 0 or idx >= len(options):
-                idx = 0
-            selected = options[idx]
-            print(f"    -> {selected['album']} ({selected.get('year', '?')})")
+        if idx < 0 or idx >= len(options):
+            idx = 0
+        selected = options[idx]
+        print(f"    -> {selected['album']} ({selected.get('year', '?')})")
 
         album_key = (selected['album'], selected.get('year', ''))
         if album_key not in album_groups:
@@ -1007,7 +1118,7 @@ def strip_artist_from_files(artist_name: str, audio_files: list[Path],
 def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                   dry_run: bool, skip_art: bool, rename: bool, strip_comments: bool,
                   log: list, skip_tagged: bool = False, keep_art: bool = False,
-                  do_strip_artist: bool = False) -> int:
+                  do_strip_artist: bool = False, rename_folders: bool = False) -> int:
     """Process all audio files in an album directory. Returns count of files processed."""
     folder_name = album_dir.name
     year, album_name = parse_album_folder(folder_name)
@@ -1018,6 +1129,12 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
 
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Processing: {artist_name} - {album_name} ({year or 'unknown year'})")
     print(f"  Found {len(mp3_files)} audio file(s)")
+
+    # If --skip-tagged, check if ALL files are already fully tagged.
+    # If so, skip the entire album (no MusicBrainz API calls needed).
+    if skip_tagged and all(has_complete_tags(str(f)) for f in mp3_files):
+        print(f"  All files already tagged — skipping album")
+        return 0
 
     # Strip artist name from filenames before any matching (e.g. "Styx - Lady.mp3" -> "Lady.mp3")
     if do_strip_artist:
@@ -1076,7 +1193,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     file_to_track = match_files_to_tracks(mp3_files, track_map)
 
     # Rename album folder to [YEAR] Album Name format
-    if rename and year:
+    if (rename or rename_folders) and year:
         old_album_dir = album_dir
         album_dir = rename_album_folder(album_dir, year, mb_album_name, dry_run, log)
         # Update file_to_track paths after folder rename
@@ -1178,7 +1295,9 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                      skip_tagged: bool = False, keep_art: bool = False,
                      confirm: bool = False, organize: bool = False,
                      organize_report: str | None = None,
-                     strip_artist: bool = False):
+                     strip_artist: bool = False,
+                     include_compilations: bool = False,
+                     rename_folders: bool = False):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -1193,7 +1312,9 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                          output_file=None, filter_str=filter_str,
                          skip_tagged=skip_tagged, keep_art=keep_art,
                          confirm=False, organize=organize,
-                         organize_report=None, strip_artist=strip_artist)
+                         organize_report=None, strip_artist=strip_artist,
+                         include_compilations=include_compilations,
+                         rename_folders=rename_folders)
         print()
         try:
             answer = input("Apply these changes? [y/N] ").strip().lower()
@@ -1259,7 +1380,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                 'unmatched': unmatched,
             })
         elif direct_audio and organize:
-            organize_loose_files(artist_name, artist_dir, direct_audio, dry_run, log)
+            organize_loose_files(artist_name, artist_dir, direct_audio, dry_run, log,
+                                 include_compilations=include_compilations)
             # Re-scan album dirs after organizing (new folders may have been created)
             if not dry_run:
                 album_dirs = sorted([d for d in artist_dir.iterdir() if d.is_dir()])
@@ -1303,7 +1425,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
             count = process_album(artist_name, album_dir, genre_override, dry_run,
                                   skip_art, rename, strip_comments, log,
                                   skip_tagged=skip_tagged, keep_art=keep_art,
-                                  do_strip_artist=strip_artist)
+                                  do_strip_artist=strip_artist,
+                                  rename_folders=rename_folders)
             stats['files'] += count
             total += count
 
@@ -1440,7 +1563,9 @@ Examples:
   %(prog)s /path/to/music --strip-comments       # remove ID3 comments
   %(prog)s /path/to/music --strip-artist         # remove artist name from filenames
   %(prog)s /path/to/music --organize             # sort loose files into album folders
+  %(prog)s /path/to/music --organize --include-compilations  # include compilations
   %(prog)s /path/to/music --organize-report r.txt # survey loose files without moving
+  %(prog)s /path/to/music --rename-folders        # rename folders only (not tracks)
   %(prog)s /path/to/music --output report.csv    # generate output report
         """
     )
@@ -1477,6 +1602,13 @@ Examples:
     parser.add_argument('--organize-report', type=str, default=None, metavar='FILE',
                         help='Survey loose files via MusicBrainz and write a text report '
                              'of album groupings without moving any files')
+    parser.add_argument('--include-compilations', action='store_true',
+                        help='Include compilations and other album types in '
+                             '--organize results (by default only studio albums, '
+                             'singles, and EPs are shown)')
+    parser.add_argument('--rename-folders', action='store_true',
+                        help='Rename album folders to [YEAR] Album Name format '
+                             'without renaming track files')
     parser.add_argument('--output', type=str, default=None, metavar='FILE',
                         help='Write a CSV report of all changes (previous paths, '
                              'new paths, skipped files)')
@@ -1490,6 +1622,8 @@ Examples:
         confirm=args.confirm, organize=args.organize,
         organize_report=args.organize_report,
         strip_artist=args.strip_artist,
+        include_compilations=args.include_compilations,
+        rename_folders=args.rename_folders,
     )
 
 

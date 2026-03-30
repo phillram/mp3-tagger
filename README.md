@@ -11,13 +11,14 @@ A Python script that automatically tags audio files (MP3, FLAC, M4A) with metada
 - **Album cover art** — downloads front cover art from the Cover Art Archive and embeds it in each file
 - **Preserve existing art** — `--keep-art` prevents overwriting cover art that's already embedded
 - **Multi-disc support** — automatically detects `CD1/`, `CD2/`, `Disc 1/`, etc. subfolders within album directories and maps tracks to the correct disc
-- **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.ext`. Edition suffixes like "(Deluxe Edition)" in folder names are preserved
-- **Organize loose files** — `--organize` interactively looks up loose audio files on MusicBrainz, lets you pick the correct album from a list (studio albums shown first, compilations last), then creates subfolders and moves files
+- **Folder renaming** — optionally renames album folders to a consistent `[YEAR] Album Name` format and track files to `NN - Title.ext`. Edition suffixes like "(Deluxe Edition)" in folder names are preserved. Track suffixes like "(2002 Remaster)" in filenames are also preserved
+- **Folder-only renaming** — `--rename-folders` renames album folders to `[YEAR] Album Name` format without touching track filenames
+- **Organize loose files** — `--organize` fetches the artist's full discography from MusicBrainz, looks up each loose file by recording, and presents a numbered album list sorted by year (oldest first). Recording matches are marked with `*`. You always choose the album, even if only one match is found. By default only studio albums, singles, and EPs are shown; use `--include-compilations` to also see compilations
 - **Organize report** — `--organize-report FILE` surveys loose files via MusicBrainz and writes a text report of album groupings and unmatched files without moving anything
 - **Strip artist from filenames** — `--strip-artist` removes the artist name prefix from track filenames (e.g. `Styx - Lady.mp3` becomes `Lady.mp3`)
 - **Hyphen normalization** — automatically replaces en-dashes, em-dashes, and other Unicode dash characters with standard hyphens (`-`) in all renamed folders and filenames
 - **Strip comments** — optionally remove all comment (COMM) frames from ID3 tags, useful for cleaning out ripping software notes, encoder info, or other junk text
-- **Skip already-tagged** — `--skip-tagged` skips files that already have complete tags (including genre and cover art), saving time on re-runs
+- **Skip already-tagged** — `--skip-tagged` skips files that already have complete tags (including genre and cover art), saving time on re-runs. When all files in an album are already tagged, the MusicBrainz lookup is skipped entirely for faster processing
 - **Filter by artist/album** — `--filter` processes only matching artists or albums in a large library
 - **Confirmation mode** — `--confirm` shows a full preview and asks for approval before making changes
 - **Output report** — generate a CSV report of all changes: previous paths, new paths, tagged files, and any skipped files
@@ -146,6 +147,15 @@ Use with `--dry-run` to preview renames first:
 python3 tag_mp3s.py /path/to/music --rename --dry-run
 ```
 
+### Rename folders only (without renaming track files)
+
+```bash
+python3 tag_mp3s.py /path/to/music --rename-folders
+python3 tag_mp3s.py /path/to/music --rename-folders --dry-run
+```
+
+Renames album folders to `[YEAR] Album Name` format using the canonical album title and year from MusicBrainz, but does not rename individual track files. Also applies all metadata tags. Useful when you want standardized folder names but prefer to keep your original track filenames.
+
 ### Organize loose files into album folders
 
 ```bash
@@ -154,13 +164,20 @@ python3 tag_mp3s.py /path/to/music --organize
 
 If audio files are found directly in an artist folder (e.g. `Radiohead/Karma Police.mp3` instead of `Radiohead/[1997] OK Computer/Karma Police.mp3`), `--organize` will:
 
-1. Look up each track on MusicBrainz by artist name + song title
-2. If multiple albums are found, present a numbered list and let you pick the correct one (default is 1, enter 0 to skip)
-3. If only one album is found, auto-select it
-4. Group the files by your selected albums
-5. Create `[YEAR] Album Name` subfolders
-6. Move the files into the correct album folders
-7. Then continue with normal tagging on the newly created albums
+1. Fetch the artist's full discography from MusicBrainz (studio albums, singles, EPs)
+2. Look up each track by recording to find which albums it appears on
+3. Present a numbered list of all albums sorted by year (oldest first), with recording matches marked with `*`
+4. Ask you to pick the correct album (default is 1, enter 0 to skip)
+5. Group the files by your selected albums
+6. Create `[YEAR] Album Name` subfolders
+7. Move the files into the correct album folders
+8. Then continue with normal tagging on the newly created albums
+
+By default, only studio albums, singles, and EPs are shown. Use `--include-compilations` to also show compilations and other album types:
+
+```bash
+python3 tag_mp3s.py /path/to/music --organize --include-compilations
+```
 
 Use with `--dry-run` to preview what would happen:
 
@@ -209,7 +226,7 @@ python3 tag_mp3s.py /path/to/music --organize-report report.txt --filter "Radioh
 python3 tag_mp3s.py /path/to/music --skip-tagged
 ```
 
-Skips files that already have complete tags (title, artist, album, track number, and year). Useful for re-running the script on a library that's partially tagged — only untagged or incomplete files will be processed.
+Skips files that already have complete tags (title, artist, album, track number, year, genre, and cover art). If every file in an album is already fully tagged, the MusicBrainz lookup is skipped entirely — no API calls are made for that album, which significantly speeds up re-runs on large libraries. Useful for re-running the script on a library that's partially tagged — only untagged or incomplete files will be processed.
 
 ### Override genre
 
@@ -281,7 +298,9 @@ python3 tag_mp3s.py /path/to/music --rename --strip-comments --skip-tagged
 python3 tag_mp3s.py /path/to/music --filter "Radiohead" --rename --confirm
 python3 tag_mp3s.py /path/to/music --keep-art --skip-tagged --output report.csv
 python3 tag_mp3s.py /path/to/music --strip-artist --rename --dry-run
+python3 tag_mp3s.py /path/to/music --rename-folders --skip-tagged
 python3 tag_mp3s.py /path/to/music --organize --rename --confirm
+python3 tag_mp3s.py /path/to/music --organize --include-compilations
 python3 tag_mp3s.py /path/to/music --organize-report survey.txt --filter "Radiohead"
 ```
 
@@ -291,15 +310,17 @@ python3 tag_mp3s.py /path/to/music --organize-report survey.txt --filter "Radioh
 |------|-------------|
 | `--dry-run` | Preview changes without modifying files |
 | `--confirm` | Preview changes, then ask before applying |
-| `--rename` | Rename folders to `[YEAR] Album` and files to `NN - Title.ext` |
+| `--rename` | Rename folders to `[YEAR] Album` and files to `NN - Title.ext` (preserves track suffixes) |
+| `--rename-folders` | Rename album folders to `[YEAR] Album` without renaming track files |
 | `--genre TEXT` | Override genre for all albums |
 | `--no-art` | Skip fetching album cover art |
 | `--keep-art` | Don't overwrite existing embedded cover art |
-| `--skip-tagged` | Skip files with complete tags (including genre and cover art) |
+| `--skip-tagged` | Skip files with complete tags (including genre and cover art); skips MusicBrainz lookup when all files are tagged |
 | `--filter TEXT` | Only process matching artists/albums |
 | `--strip-comments` | Remove ID3 comment frames |
 | `--strip-artist` | Remove artist name prefix from track filenames |
-| `--organize` | Interactively sort loose files into album subfolders |
+| `--organize` | Interactively sort loose files into album subfolders (shows full discography) |
+| `--include-compilations` | Include compilations and other album types in `--organize` results |
 | `--organize-report FILE` | Survey loose files and write a text report (no files moved) |
 | `--output FILE` | Write a CSV report of all changes |
 
