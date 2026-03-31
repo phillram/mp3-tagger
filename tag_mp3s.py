@@ -575,6 +575,9 @@ def _fetch_artist_albums(artist: str, all_release_types: bool = False) -> list[d
                 break
             offset += len(rgs)
 
+        # Types to include in the default (non-all) view
+        _default_types = {'album', 'single', 'ep', ''}
+
         albums: list[dict] = []
         seen: set[str] = set()
         for rg in all_rgs:
@@ -583,6 +586,9 @@ def _fetch_artist_albums(artist: str, all_release_types: bool = False) -> list[d
             year = rg.get('first-release-date', '')[:4] or None
             key = title.lower()
             if key in seen:
+                continue
+            # Apply type filter in code — the API-level filter is unreliable
+            if not all_release_types and rg_type.lower() not in _default_types:
                 continue
             seen.add(key)
             albums.append({
