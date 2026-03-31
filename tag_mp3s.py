@@ -908,28 +908,29 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
         # Search for this specific recording to find which albums it appears on
         recording_options = _search_mb_recording_options(artist_name, file_title)
 
-        # Filter to Album/Single/Compilation by default; include all types with --all-release-types
-        if not all_release_types:
-            recording_options = [o for o in recording_options
-                                 if o.get('release_type', '').lower() in ('album', 'single', 'ep', '')]
-
-        # Build merged list: recording matches first (marked), then remaining artist albums
-        recording_keys = {(o['album'].lower(), o.get('year')) for o in recording_options}
-
-        # Mark recording matches
+        # Mark all recording matches
         for o in recording_options:
             o['_matched'] = True
 
-        # Add remaining artist albums that weren't in the recording results
+        recording_keys = {(o['album'].lower(), o.get('year')) for o in recording_options}
+
+        # Build merged list:
+        # - All Albums from the discography always appear (regardless of recording match)
+        # - Non-album types (Singles, EPs, etc.) only appear if they matched this recording
         remaining = []
         for a in all_artist_albums:
             key = (a['album'].lower(), a.get('year'))
-            if key not in recording_keys:
-                entry = dict(a)
-                entry['_matched'] = False
-                remaining.append(entry)
+            if key in recording_keys:
+                continue  # already in recording_options
+            rtype = a.get('release_type', '').lower()
+            is_album = rtype in ('album', '')
+            if not is_album and not all_release_types:
+                continue  # non-album types only show when they matched the recording
+            entry = dict(a)
+            entry['_matched'] = False
+            remaining.append(entry)
 
-        # Combine: recording matches first, then rest of discography
+        # Combine: recording matches first, then remaining discography albums
         options = recording_options + remaining
 
         # Sort by type (Album → EP → Single → Compilation → Live → Other),
