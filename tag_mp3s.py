@@ -906,39 +906,60 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
         print(f"  Looking up: {file_title}")
 
         # Search for this specific recording to find which albums it appears on
-        recording_options = _search_mb_recording_options(artist_name, file_title)
-
-        # Mark all recording matches
-        for o in recording_options:
+        all_recording_options = _search_mb_recording_options(artist_name, file_title)
+        for o in all_recording_options:
             o['_matched'] = True
 
+        # All keys that matched this recording (used to decide which Singles/EPs to show)
+        all_matched_keys = {(o['album'].lower(), o.get('year')) for o in all_recording_options}
+
+        # Allowed types for recording matches:
+        # default = Album, Single, EP; --all-release-types = everything
+        if all_release_types:
+            allowed_types = None  # no restriction
+        else:
+            allowed_types = {'album', 'single', 'ep', ''}
+
+        recording_options = [
+            o for o in all_recording_options
+            if allowed_types is None or o.get('release_type', '').lower() in allowed_types
+        ]
         recording_keys = {(o['album'].lower(), o.get('year')) for o in recording_options}
 
-        # Build merged list:
-        # - All Albums from the discography always appear (regardless of recording match)
-        # - Non-album types (Singles, EPs, etc.) only appear if they matched this recording
+        # Build remaining from discography:
+        # - Albums always appear
+        # - Singles/EPs only appear if they matched this recording
+        # - Compilations/Live/other excluded unless --all-release-types
         remaining = []
         for a in all_artist_albums:
             key = (a['album'].lower(), a.get('year'))
             if key in recording_keys:
-                continue  # already in recording_options
+                continue  # already represented by a recording match
             rtype = a.get('release_type', '').lower()
             is_album = rtype in ('album', '')
-            if not is_album and not all_release_types:
-                continue  # non-album types only show when they matched the recording
+            if all_release_types:
+                pass  # include everything
+            elif is_album:
+                pass  # albums always included
+            elif rtype in ('single', 'ep'):
+                if key not in all_matched_keys:
+                    continue  # only show if it matched this recording
+            else:
+                continue  # compilations, live, etc. excluded in default mode
             entry = dict(a)
-            entry['_matched'] = False
+            entry['_matched'] = key in all_matched_keys
             remaining.append(entry)
 
-        # Combine: recording matches first, then remaining discography albums
+        # Combine and sort by type then year
         options = recording_options + remaining
-
-        # Sort by type (Album → EP → Single → Compilation → Live → Other),
-        # then by year within each type (oldest first, unknown years last)
         options.sort(key=lambda o: (
             _release_type_sort_key(o.get('release_type', '')),
             o.get('year') or '9999',
         ))
+
+        # Cap at 50 options to keep the list manageable
+        if len(options) > 50:
+            options = options[:50]
 
         if not options:
             print(f"    No album found")
