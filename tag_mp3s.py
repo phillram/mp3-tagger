@@ -1122,7 +1122,8 @@ def strip_artist_from_files(artist_name: str, audio_files: list[Path],
 def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                   dry_run: bool, skip_art: bool, rename_tracks: bool, strip_comments: bool,
                   log: list, skip_tagged: bool = False, keep_art: bool = False,
-                  do_strip_artist: bool = False, rename_folders: bool = False) -> int:
+                  do_strip_artist: bool = False, rename_folders: bool = False,
+                  apply_tags: bool = False) -> int:
     """Process all audio files in an album directory. Returns count of files processed."""
     folder_name = album_dir.name
     year, album_name = parse_album_folder(folder_name)
@@ -1134,9 +1135,9 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     print(f"\n{'[DRY RUN] ' if dry_run else ''}Processing: {artist_name} - {album_name} ({year or 'unknown year'})")
     print(f"  Found {len(mp3_files)} audio file(s)")
 
-    # If --skip-tagged, check if ALL files are already fully tagged.
+    # If --skip-tagged with --tag, check if ALL files are already fully tagged.
     # If so, skip the entire album (no MusicBrainz API calls needed).
-    if skip_tagged and all(has_complete_tags(str(f)) for f in mp3_files):
+    if apply_tags and skip_tagged and all(has_complete_tags(str(f)) for f in mp3_files):
         print(f"  All files already tagged — skipping album")
         return 0
 
@@ -1179,8 +1180,8 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         # original folder name (e.g. "(Deluxe Edition)") that MB doesn't include.
         mb_album_name = _preserve_album_suffix(album_name, release.get('title', album_name))
 
-        # Fetch cover art
-        if not skip_art:
+        # Fetch cover art (only needed when applying tags)
+        if apply_tags and not skip_art:
             print("  Fetching album art...")
             cover_art = fetch_cover_art(release['id'])
             if cover_art:
@@ -1224,71 +1225,73 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
 
     count = 0
     skipped_tagged = 0
-    for filepath_str, track_info in file_to_track.items():
-        mp3_path = Path(filepath_str)
 
-        # Skip already-tagged files if requested
-        if skip_tagged and has_complete_tags(filepath_str):
-            skipped_tagged += 1
-            continue
+    if apply_tags:
+        for filepath_str, track_info in file_to_track.items():
+            mp3_path = Path(filepath_str)
 
-        # Determine cover art for this file
-        file_cover_art = cover_art
-        if keep_art and cover_art:
-            # Preserve existing art if the file already has embedded art
-            if _file_has_cover_art(filepath_str):
-                file_cover_art = None
+            # Skip already-tagged files if requested
+            if skip_tagged and has_complete_tags(filepath_str):
+                skipped_tagged += 1
+                continue
 
-        try:
-            changes = apply_tags(
-                filepath=filepath_str,
-                artist=artist_name,
-                album=mb_album_name,
-                year=year,
-                track_info=track_info,
-                genre=genre,
-                label=label,
-                cover_art=file_cover_art,
-                dry_run=dry_run,
-                strip_comments=strip_comments,
-            )
-        except (PermissionError, mutagen.MutagenError) as e:
-            print(f"  ERROR: Could not tag '{mp3_path.name}': {e}")
+            # Determine cover art for this file
+            file_cover_art = cover_art
+            if keep_art and cover_art:
+                # Preserve existing art if the file already has embedded art
+                if _file_has_cover_art(filepath_str):
+                    file_cover_art = None
+
+            try:
+                changes = apply_tags(
+                    filepath=filepath_str,
+                    artist=artist_name,
+                    album=mb_album_name,
+                    year=year,
+                    track_info=track_info,
+                    genre=genre,
+                    label=label,
+                    cover_art=file_cover_art,
+                    dry_run=dry_run,
+                    strip_comments=strip_comments,
+                )
+            except (PermissionError, mutagen.MutagenError) as e:
+                print(f"  ERROR: Could not tag '{mp3_path.name}': {e}")
+                log.append({
+                    'type': 'file',
+                    'status': 'skipped',
+                    'reason': str(e),
+                    'previous_path': filepath_str,
+                    'new_path': filepath_str,
+                })
+                continue
+
+            status = "WOULD TAG" if dry_run else "TAGGED"
+            title = changes.get('title', '?')
+            track = changes.get('track', '?')
+            art_indicator = " [+art]" if changes.get('has_cover') else ""
+            genre_str = f" [{changes.get('genre')}]" if changes.get('genre') else ""
+            comment_indicator = " [-comments]" if changes.get('comments_removed') else ""
+            print(f"  {status}: {track} - {title}{genre_str}{art_indicator}{comment_indicator}")
+
             log.append({
                 'type': 'file',
-                'status': 'skipped',
-                'reason': str(e),
+                'status': 'would_tag' if dry_run else 'tagged',
                 'previous_path': filepath_str,
                 'new_path': filepath_str,
+                'artist': changes.get('artist', ''),
+                'album': changes.get('album', ''),
+                'title': changes.get('title', ''),
+                'track': changes.get('track', ''),
+                'genre': changes.get('genre', ''),
+                'year': changes.get('year', ''),
+                'has_cover': str(changes.get('has_cover', False)),
+                'mb_matched': str(release is not None),
             })
-            continue
+            count += 1
 
-        status = "WOULD TAG" if dry_run else "TAGGED"
-        title = changes.get('title', '?')
-        track = changes.get('track', '?')
-        art_indicator = " [+art]" if changes.get('has_cover') else ""
-        genre_str = f" [{changes.get('genre')}]" if changes.get('genre') else ""
-        comment_indicator = " [-comments]" if changes.get('comments_removed') else ""
-        print(f"  {status}: {track} - {title}{genre_str}{art_indicator}{comment_indicator}")
-
-        log.append({
-            'type': 'file',
-            'status': 'would_tag' if dry_run else 'tagged',
-            'previous_path': filepath_str,
-            'new_path': filepath_str,
-            'artist': changes.get('artist', ''),
-            'album': changes.get('album', ''),
-            'title': changes.get('title', ''),
-            'track': changes.get('track', ''),
-            'genre': changes.get('genre', ''),
-            'year': changes.get('year', ''),
-            'has_cover': str(changes.get('has_cover', False)),
-            'mb_matched': str(release is not None),
-        })
-        count += 1
-
-    if skipped_tagged:
-        print(f"  Skipped {skipped_tagged} already-tagged file(s)")
+        if skipped_tagged:
+            print(f"  Skipped {skipped_tagged} already-tagged file(s)")
 
     return count
 
@@ -1301,7 +1304,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                      organize_report: str | None = None,
                      strip_artist: bool = False,
                      all_release_types: bool = False,
-                     rename_folders: bool = False):
+                     rename_folders: bool = False,
+                     apply_tags: bool = False):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -1318,7 +1322,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                          confirm=False, organize=organize,
                          organize_report=None, strip_artist=strip_artist,
                          all_release_types=all_release_types,
-                         rename_folders=rename_folders)
+                         rename_folders=rename_folders,
+                         apply_tags=apply_tags)
         print()
         try:
             answer = input("Apply these changes? [y/N] ").strip().lower()
@@ -1430,7 +1435,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                                   skip_art, rename_tracks, strip_comments, log,
                                   skip_tagged=skip_tagged, keep_art=keep_art,
                                   do_strip_artist=strip_artist,
-                                  rename_folders=rename_folders)
+                                  rename_folders=rename_folders,
+                                  apply_tags=apply_tags)
             stats['files'] += count
             total += count
 
@@ -1554,12 +1560,12 @@ Expected folder structure:
 Supported formats: MP3, FLAC, M4A/MP4/AAC
 
 Examples:
-  %(prog)s /path/to/music --dry-run              # preview changes
-  %(prog)s /path/to/music                        # apply tags
-  %(prog)s /path/to/music --confirm              # preview then ask before applying
-  %(prog)s /path/to/music --genre Rock           # force genre
-  %(prog)s /path/to/music --no-art               # skip album art
-  %(prog)s /path/to/music --keep-art             # don't overwrite existing art
+  %(prog)s /path/to/music --tag                  # write metadata tags to files
+  %(prog)s /path/to/music --tag --dry-run        # preview tag changes
+  %(prog)s /path/to/music --tag --confirm        # preview then ask before applying
+  %(prog)s /path/to/music --tag --genre Rock     # force genre
+  %(prog)s /path/to/music --tag --no-art         # tag without fetching cover art
+  %(prog)s /path/to/music --tag --keep-art       # tag but don't overwrite existing art
   %(prog)s /path/to/music --rename-tracks        # fix folder + track file names
   %(prog)s /path/to/music --rename-tracks --dry-run  # preview renames
   %(prog)s /path/to/music --skip-tagged          # skip already-tagged files
@@ -1584,6 +1590,9 @@ Examples:
                         help='Skip fetching album cover art')
     parser.add_argument('--keep-art', action='store_true',
                         help='Preserve existing embedded cover art (don\'t overwrite)')
+    parser.add_argument('--tag', action='store_true',
+                        help='Write metadata tags to audio files (title, artist, album, '
+                             'track number, year, genre, label, cover art)')
     parser.add_argument('--rename-tracks', action='store_true',
                         help='Rename track files to "NN - Title.ext" format using '
                              'MusicBrainz track numbers (also renames album folders)')
@@ -1621,6 +1630,7 @@ Examples:
     scan_and_process(
         args.directory, args.genre, args.dry_run, args.no_art,
         rename_tracks=args.rename_tracks, strip_comments=args.strip_comments,
+        apply_tags=args.tag,
         output_file=args.output, filter_str=args.filter_str,
         skip_tagged=args.skip_tagged, keep_art=args.keep_art,
         confirm=args.confirm, organize=args.organize,
