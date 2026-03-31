@@ -1123,7 +1123,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                   dry_run: bool, skip_art: bool, rename_tracks: bool, strip_comments: bool,
                   log: list, skip_tagged: bool = False, keep_art: bool = False,
                   do_strip_artist: bool = False, rename_folders: bool = False,
-                  apply_tags: bool = False) -> int:
+                  do_tag: bool = False) -> int:
     """Process all audio files in an album directory. Returns count of files processed."""
     folder_name = album_dir.name
     year, album_name = parse_album_folder(folder_name)
@@ -1137,7 +1137,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
 
     # If --skip-tagged with --tag, check if ALL files are already fully tagged.
     # If so, skip the entire album (no MusicBrainz API calls needed).
-    if apply_tags and skip_tagged and all(has_complete_tags(str(f)) for f in mp3_files):
+    if do_tag and skip_tagged and all(has_complete_tags(str(f)) for f in mp3_files):
         print(f"  All files already tagged — skipping album")
         return 0
 
@@ -1181,7 +1181,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         mb_album_name = _preserve_album_suffix(album_name, release.get('title', album_name))
 
         # Fetch cover art (only needed when applying tags)
-        if apply_tags and not skip_art:
+        if do_tag and not skip_art:
             print("  Fetching album art...")
             cover_art = fetch_cover_art(release['id'])
             if cover_art:
@@ -1226,7 +1226,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     count = 0
     skipped_tagged = 0
 
-    if apply_tags:
+    if do_tag:
         for filepath_str, track_info in file_to_track.items():
             mp3_path = Path(filepath_str)
 
@@ -1305,7 +1305,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                      strip_artist: bool = False,
                      all_release_types: bool = False,
                      rename_folders: bool = False,
-                     apply_tags: bool = False):
+                     do_tag: bool = False):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -1323,7 +1323,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                          organize_report=None, strip_artist=strip_artist,
                          all_release_types=all_release_types,
                          rename_folders=rename_folders,
-                         apply_tags=apply_tags)
+                         do_tag=do_tag)
         print()
         try:
             answer = input("Apply these changes? [y/N] ").strip().lower()
@@ -1436,7 +1436,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                                   skip_tagged=skip_tagged, keep_art=keep_art,
                                   do_strip_artist=strip_artist,
                                   rename_folders=rename_folders,
-                                  apply_tags=apply_tags)
+                                  do_tag=do_tag)
             stats['files'] += count
             total += count
 
@@ -1630,7 +1630,7 @@ Examples:
     scan_and_process(
         args.directory, args.genre, args.dry_run, args.no_art,
         rename_tracks=args.rename_tracks, strip_comments=args.strip_comments,
-        apply_tags=args.tag,
+        do_tag=args.tag,
         output_file=args.output, filter_str=args.filter_str,
         skip_tagged=args.skip_tagged, keep_art=args.keep_art,
         confirm=args.confirm, organize=args.organize,
