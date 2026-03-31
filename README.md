@@ -160,9 +160,9 @@ python3 tag_mp3s.py /path/to/music --organize --dry-run
 
 For each loose file, `--organize` will:
 
-1. Fetch the artist's discography from MusicBrainz (Albums, Singles, and Compilations by default)
+1. Fetch the artist's discography from MusicBrainz (Albums, Singles, and EPs by default)
 2. Look up the recording to find which albums it appears on — those matches are marked with `*`
-3. Present a numbered list of albums grouped by type (Albums → Singles → Compilations), sorted oldest first within each group
+3. Present a numbered list of albums grouped by type (Albums → EPs → Singles), sorted oldest first within each group
 4. Ask you to pick the correct album (press Enter for option 1, or enter `0` to skip the file)
 5. Create `[YEAR] Album Name` subfolders and move the files into them
 6. Continue with normal tagging on the newly organised albums
@@ -175,7 +175,7 @@ Files that can't be matched to any album on MusicBrainz are left in place and lo
 python3 tag_mp3s.py /path/to/music --organize --all-release-types
 ```
 
-By default `--organize` only shows Albums, Singles, and Compilations. Use `--all-release-types` to also include EPs, Live releases, and any other type in the list.
+By default `--organize` only shows Albums, Singles, and EPs. Use `--all-release-types` to also include Compilations, Live releases, and any other type in the list.
 
 #### Survey loose files without moving them
 
@@ -327,7 +327,7 @@ python3 tag_mp3s.py /path/to/music --strip-artist --dry-run
 # Organize loose files, then tag and rename everything
 python3 tag_mp3s.py /path/to/music --organize --tag --rename-tracks --confirm
 
-# Organize with all release types visible (EPs, Live, etc.)
+# Organize with all release types visible (Compilations, Live, etc.)
 python3 tag_mp3s.py /path/to/music --organize --all-release-types
 
 # Survey loose files for one artist before organizing
@@ -353,7 +353,7 @@ python3 tag_mp3s.py /path/to/music --tag --keep-art --skip-tagged --output repor
 | `--rename-tracks` | Rename track files to `NN - Title.ext` using MusicBrainz track numbers (title kept from original filename); also renames album folders to `[YEAR] Album` |
 | `--rename-folders` | Rename album folders to `[YEAR] Album` without renaming track files |
 | `--organize` | Interactively sort loose files into album subfolders using MusicBrainz |
-| `--all-release-types` | Include EPs, Live, and all other release types in `--organize` results (default: Albums, Singles, Compilations only) |
+| `--all-release-types` | Include Compilations, Live, and all other release types in `--organize` results (default: Albums, Singles, EPs only) |
 | `--organize-report FILE` | Survey loose files and write a text report without moving anything |
 | `--skip-tagged` | With `--tag`: skip files that already have complete tags; skips MusicBrainz lookup if all files in an album are tagged |
 | `--genre TEXT` | With `--tag`: override genre for all albums instead of using MusicBrainz community tags |

@@ -535,8 +535,8 @@ def _search_mb_recording_options(artist: str, title: str) -> list[dict]:
 def _fetch_artist_albums(artist: str, all_release_types: bool = False) -> list[dict]:
     """Fetch albums for an artist from MusicBrainz.
 
-    By default fetches Albums, Singles, and Compilations. Pass
-    all_release_types=True to fetch every type (EPs, Live, etc.).
+    By default fetches Albums, Singles, and EPs. Pass
+    all_release_types=True to fetch every type (Compilations, Live, etc.).
 
     Returns a list of dicts with keys: album, year, release_id, release_type.
     Results are sorted by type then year (oldest first).
@@ -553,7 +553,7 @@ def _fetch_artist_albums(artist: str, all_release_types: bool = False) -> list[d
             return []
 
         # Fetch release groups
-        type_filter = ['album', 'single', 'compilation']
+        type_filter = ['album', 'single', 'ep']
         if all_release_types:
             type_filter = []  # empty = no filter, returns all types
 
@@ -874,8 +874,8 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
     user to choose.  The list includes albums from the artist's discography
     (fetched once upfront), with recording-specific matches marked with *.
 
-    By default shows Albums, Singles, and Compilations only. Pass
-    all_release_types=True to also show EPs, Live releases, and every other type.
+    By default shows Albums, Singles, and EPs only. Pass
+    all_release_types=True to also show Compilations, Live releases, and every other type.
 
     Within each type, options are sorted by year (oldest first).
 
@@ -905,7 +905,7 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
         # Filter to Album/Single/Compilation by default; include all types with --all-release-types
         if not all_release_types:
             recording_options = [o for o in recording_options
-                                 if o.get('release_type', '').lower() in ('album', 'single', 'compilation', '')]
+                                 if o.get('release_type', '').lower() in ('album', 'single', 'ep', '')]
 
         # Build merged list: recording matches first (marked), then remaining artist albums
         recording_keys = {(o['album'].lower(), o.get('year')) for o in recording_options}
@@ -1618,7 +1618,7 @@ Examples:
     parser.add_argument('--all-release-types', action='store_true',
                         help='Show all release types in --organize results '
                              '(EPs, Live, etc.) — by default only Albums, '
-                             'Singles, and Compilations are shown)')
+                             'Singles, and EPs are shown)')
     parser.add_argument('--rename-folders', action='store_true',
                         help='Rename album folders to [YEAR] Album Name format '
                              'without renaming track files')
