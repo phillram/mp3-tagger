@@ -542,13 +542,20 @@ def _fetch_artist_albums(artist: str, all_release_types: bool = False) -> list[d
     Results are sorted by type then year (oldest first).
     """
     try:
-        results = _mb_api_call(mb.search_artists, query=f'artist:"{artist}"', limit=5)
+        results = _mb_api_call(mb.search_artists, query=f'artist:"{artist}"', limit=10)
         artist_list = results.get('artist-list', [])
         if not artist_list:
             return []
 
-        # Pick the best-matching artist
-        artist_id = artist_list[0].get('id')
+        # Prefer an exact name match over the top-ranked result.
+        # e.g. searching "Connie" should not pick "Connie Francis".
+        artist_lower = artist.lower()
+        exact = next(
+            (a for a in artist_list if a.get('name', '').lower() == artist_lower),
+            None,
+        )
+        chosen = exact or artist_list[0]
+        artist_id = chosen.get('id')
         if not artist_id:
             return []
 
