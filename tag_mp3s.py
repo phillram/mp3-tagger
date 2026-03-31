@@ -957,8 +957,8 @@ def organize_loose_files(artist_name: str, artist_dir: Path, audio_files: list[P
             o.get('year') or '9999',
         ))
 
-        # Cap at 50 options to keep the list manageable
-        if len(options) > 50:
+        # Cap at 50 options in default mode to keep the list manageable
+        if not all_release_types and len(options) > 50:
             options = options[:50]
 
         if not options:
