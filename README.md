@@ -249,7 +249,12 @@ python3 tag_mp3s.py /path/to/music --strip-artist --dry-run
 
 Removes the artist name prefix from track filenames. For example:
 - `Styx - Lady.mp3` → `Lady.mp3`
+- `01 - Styx - Lady.mp3` → `01 - Lady.mp3`
 - `01 Styx - Lady.mp3` → `01 Lady.mp3`
+
+**Runs even with `--skip-tagged`** — this is a filename rename, not a tag write. It is not affected by `--skip-tagged` and will always process every file it finds the artist prefix on.
+
+When combined with `--title-from-filename`, the artist is stripped from the filename *first*, so the cleaned name becomes the title tag — not the original name with the artist still in it.
 
 #### Remove comment tags
 
@@ -261,11 +266,11 @@ Removes all comment (`COMM`) frames from MP3 ID3 tags. These often contain junk 
 
 ---
 
-### Tag Title from Filename
+### Title from Filename
 
 ```bash
-python3 tag_mp3s.py /path/to/music --tag-from-filename
-python3 tag_mp3s.py /path/to/music --tag-from-filename --dry-run
+python3 tag_mp3s.py /path/to/music --title-from-filename
+python3 tag_mp3s.py /path/to/music --title-from-filename --dry-run
 ```
 
 Copies the filename (stripped of its leading track number) to the title tag. No MusicBrainz lookup, no internet connection needed. The number-stripping uses the same logic as the rest of the script:
@@ -279,16 +284,20 @@ Copies the filename (stripped of its leading track number) to the title tag. No 
 
 Only the title tag is written — all other tags (artist, album, track number, year, cover art) are left as-is. Works on MP3, FLAC, and M4A/AAC files.
 
-#### Combining with other flags — `--tag-from-filename` always wins
+**Runs even with `--skip-tagged`** — because it only touches the title tag and needs no online lookup, it is deliberately not affected by `--skip-tagged`. Files that would otherwise be skipped will still have their title tag updated from the filename.
 
-`--tag-from-filename` always runs **last** and always takes precedence over any title set by other flags. This means you can combine it with `--tag` or `--rename-tracks` and the filename will still be what ends up in the title tag:
+If you are also using `--strip-artist`, the artist name is stripped from the filename *first*, then the cleaned filename is used as the title. So `01 - Blondie - Denis.mp3` becomes title `Denis`, not `Blondie - Denis`.
+
+#### Combining with other flags — `--title-from-filename` always wins
+
+`--title-from-filename` always runs **last** and always takes precedence over any title set by other flags. This means you can combine it with `--tag` or `--rename-tracks` and the filename will still be what ends up in the title tag:
 
 | Flags | What happens |
 |-------|-------------|
-| `--tag-from-filename` | No MB lookup; title written from filename only |
-| `--tag --tag-from-filename` | Full MB tagging (artist, album, art, etc.), then filename overwrites the title |
-| `--rename-tracks --tag-from-filename` | MB used to get track numbers for renaming; filename used for the title tag |
-| `--tag --rename-tracks --tag-from-filename` | MB tags + renames everything; filename overwrites the title at the end |
+| `--title-from-filename` | No MB lookup; title written from filename only |
+| `--tag --title-from-filename` | Full MB tagging (artist, album, art, etc.), then filename overwrites the title |
+| `--rename-tracks --title-from-filename` | MB used to get track numbers for renaming; filename used for the title tag |
+| `--tag --rename-tracks --title-from-filename` | MB tags + renames everything; filename overwrites the title at the end |
 
 This is useful when your filenames are already the authoritative source for track titles but you still want MusicBrainz to fill in everything else (art, year, genre, track numbers, etc.).
 
@@ -367,10 +376,13 @@ python3 tag_mp3s.py /path/to/music --organize --all-release-types
 python3 tag_mp3s.py /path/to/music --organize-report survey.txt --filter "Radiohead"
 
 # Set title tags from filenames only (no internet connection needed)
-python3 tag_mp3s.py /path/to/music --tag-from-filename
+python3 tag_mp3s.py /path/to/music --title-from-filename
 
 # Full MB tagging (art, year, genre, etc.) but keep filename as the title
-python3 tag_mp3s.py /path/to/music --tag --tag-from-filename
+python3 tag_mp3s.py /path/to/music --tag --title-from-filename
+
+# Strip artist prefix from filenames then use the cleaned name as the title tag
+python3 tag_mp3s.py /path/to/music --strip-artist --title-from-filename
 
 # Tag with a genre override and save a change report
 python3 tag_mp3s.py /path/to/music --tag --genre "Electronic" --output report.csv
@@ -398,9 +410,9 @@ python3 tag_mp3s.py /path/to/music --tag --keep-art --skip-tagged --output repor
 | `--genre TEXT` | With `--tag`: override genre for all albums instead of using MusicBrainz community tags |
 | `--no-art` | With `--tag`: skip downloading and embedding cover art |
 | `--keep-art` | With `--tag`: only embed art in files that don't already have it |
-| `--strip-artist` | Remove artist name prefix from track filenames |
+| `--strip-artist` | Remove artist name prefix from track filenames (e.g. `01 - Artist - Song.mp3` → `01 - Song.mp3`); runs even with `--skip-tagged` |
 | `--strip-comments` | With `--tag`: remove all comment (COMM) frames from MP3 ID3 tags |
-| `--tag-from-filename` | Copy filename (stripped of leading track number) to title tag — always takes precedence over any MB title; no online lookup when used alone |
+| `--title-from-filename` | Copy filename (stripped of leading track number) to title tag — always takes precedence over any other title source; runs even with `--skip-tagged`; no online lookup when used alone |
 | `--output FILE` | Write a CSV report of all changes |
 
 ---
@@ -411,7 +423,7 @@ Each audio file receives the following tags (in the format-appropriate field):
 
 | Tag | MP3 (ID3v2.4) | FLAC (Vorbis) | M4A (MP4) | Source |
 |-----|---------------|---------------|-----------|--------|
-| Song title | `TIT2` | `title` | `©nam` | MusicBrainz recording title, falls back to filename; always overridden by `--tag-from-filename` |
+| Song title | `TIT2` | `title` | `©nam` | MusicBrainz recording title, falls back to filename; always overridden by `--title-from-filename` |
 | Artist | `TPE1` | `artist` | `©ART` | MusicBrainz canonical artist name |
 | Album artist | `TPE2` | `albumartist` | `aART` | MusicBrainz canonical artist name |
 | Album | `TALB` | `album` | `©alb` | MusicBrainz release title |
@@ -435,7 +447,7 @@ Each audio file receives the following tags (in the format-appropriate field):
 7. **Match** — maps each file to its MusicBrainz track info in a single pass, ensuring consistent metadata for both renaming and tagging
 8. **Rename** *(optional)* — renames folders and/or files to canonical format
 9. **Write** — applies tags to each audio file in the appropriate format
-10. **Title override** *(optional)* — if `--tag-from-filename` is set, overwrites the title tag from the filename as the final step, taking precedence over any MB title written in step 9
+10. **Title override** *(optional)* — if `--title-from-filename` is set, overwrites the title tag from the filename as the final step, taking precedence over any MB title written in step 9
 11. **Report** — prints a summary and optionally writes a CSV report
 
 ---

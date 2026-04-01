@@ -111,8 +111,9 @@ def strip_artist_from_filename(filename: str, artist_name: str) -> str | None:
     ext = Path(filename).suffix
     normalized = normalize_hyphens(stem)
 
-    # Try with leading track number: "01 Artist - Title" or "01. Artist - Title"
-    m = re.match(r'^(\d{1,3}[\s.]*)', normalized)
+    # Capture the full track-number prefix including any separator (space, dot, or dash).
+    # e.g. "01 - ", "01. ", "01 ", "01-"
+    m = re.match(r'^(\d{1,3}\s*[-.]?\s*)', normalized)
     prefix = m.group(1) if m else ''
     rest = normalized[len(prefix):]
 
@@ -1185,7 +1186,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                   dry_run: bool, skip_art: bool, rename_tracks: bool, strip_comments: bool,
                   log: list, skip_tagged: bool = False, keep_art: bool = False,
                   do_strip_artist: bool = False, rename_folders: bool = False,
-                  do_tag: bool = False, tag_from_filename: bool = False) -> int:
+                  do_tag: bool = False, title_from_filename: bool = False) -> int:
     """Process all audio files in an album directory. Returns count of files processed."""
     folder_name = album_dir.name
     year, album_name = parse_album_folder(folder_name)
@@ -1198,8 +1199,11 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     print(f"  Found {len(mp3_files)} audio file(s)")
 
     # If --skip-tagged with --tag, check if ALL files are already fully tagged.
-    # If so, skip the entire album (no MusicBrainz API calls needed).
-    if do_tag and skip_tagged and all(has_complete_tags(str(f)) for f in mp3_files):
+    # --strip-artist and --title-from-filename always run regardless of --skip-tagged,
+    # so only skip the album early if neither of those is also set.
+    if (do_tag and skip_tagged
+            and not do_strip_artist and not title_from_filename
+            and all(has_complete_tags(str(f)) for f in mp3_files)):
         print(f"  All files already tagged — skipping album")
         return 0
 
@@ -1207,10 +1211,10 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     if do_strip_artist:
         mp3_files = strip_artist_from_files(artist_name, mp3_files, dry_run, log)
 
-    # If only --tag-from-filename is set (no MB-dependent flags), skip the online lookup entirely
-    skip_mb_lookup = tag_from_filename and not do_tag and not rename_tracks and not rename_folders
+    # If only --title-from-filename is set (no MB-dependent flags), skip the online lookup entirely
+    skip_mb_lookup = title_from_filename and not do_tag and not rename_tracks and not rename_folders
 
-    # Look up on MusicBrainz (skipped when only --tag-from-filename is set)
+    # Look up on MusicBrainz (skipped when only --title-from-filename is set)
     release = None
     track_map = {}
     genre = genre_override
@@ -1361,9 +1365,9 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         if skipped_tagged:
             print(f"  Skipped {skipped_tagged} already-tagged file(s)")
 
-    # --tag-from-filename always runs last so it overrides any title set by --tag.
+    # --title-from-filename always runs last so it overrides any title set by --tag.
     # In the pure case (no --tag, no rename flags) it also provides the count.
-    if tag_from_filename:
+    if title_from_filename:
         for filepath_str, _ in (file_to_track.items() if not skip_mb_lookup else
                                  ((str(p), None) for p in mp3_files)):
             mp3_path = Path(filepath_str)
@@ -1376,7 +1380,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                 print(f"  ERROR: Could not write title tag '{mp3_path.name}': {e}")
                 continue
             if skip_mb_lookup:
-                # Pure --tag-from-filename run: log each file and count it
+                # Pure --title-from-filename run: log each file and count it
                 log.append({
                     'type': 'file',
                     'status': 'would_tag' if dry_run else 'tagged',
@@ -1406,7 +1410,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                      all_release_types: bool = False,
                      rename_folders: bool = False,
                      do_tag: bool = False,
-                     tag_from_filename: bool = False):
+                     title_from_filename: bool = False):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -1425,7 +1429,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                          all_release_types=all_release_types,
                          rename_folders=rename_folders,
                          do_tag=do_tag,
-                         tag_from_filename=tag_from_filename)
+                         title_from_filename=title_from_filename)
         print()
         try:
             answer = input("Apply these changes? [y/N] ").strip().lower()
@@ -1539,7 +1543,7 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                                   do_strip_artist=strip_artist,
                                   rename_folders=rename_folders,
                                   do_tag=do_tag,
-                                  tag_from_filename=tag_from_filename)
+                                  title_from_filename=title_from_filename)
             stats['files'] += count
             total += count
 
@@ -1675,6 +1679,7 @@ Examples:
   %(prog)s /path/to/music --filter "Radiohead"   # process one artist only
   %(prog)s /path/to/music --strip-comments       # remove ID3 comments
   %(prog)s /path/to/music --strip-artist         # remove artist name from filenames
+  %(prog)s /path/to/music --title-from-filename  # copy filename to title tag
   %(prog)s /path/to/music --organize             # sort loose files into album folders
   %(prog)s /path/to/music --organize --all-release-types    # include EPs, Live, etc.
   %(prog)s /path/to/music --organize-report r.txt # survey loose files without moving
@@ -1696,9 +1701,10 @@ Examples:
     parser.add_argument('--tag', action='store_true',
                         help='Write metadata tags to audio files (title, artist, album, '
                              'track number, year, genre, label, cover art)')
-    parser.add_argument('--tag-from-filename', action='store_true',
+    parser.add_argument('--title-from-filename', action='store_true',
                         help='Copy the filename (stripped of leading track number) to the '
-                             'title tag — no online lookup, works on any audio file')
+                             'title tag — always takes precedence over any other title source; '
+                             'no online lookup when used alone; runs even with --skip-tagged')
     parser.add_argument('--rename-tracks', action='store_true',
                         help='Rename track files to "NN - Title.ext" format using '
                              'MusicBrainz track numbers (also renames album folders)')
@@ -1713,7 +1719,8 @@ Examples:
                         help='Remove all comment (COMM) frames from MP3 ID3 tags')
     parser.add_argument('--strip-artist', action='store_true',
                         help='Remove artist name prefix from track filenames '
-                             '(e.g. "Styx - Lady.mp3" -> "Lady.mp3")')
+                             '(e.g. "Styx - Lady.mp3" -> "Lady.mp3"); '
+                             'runs even with --skip-tagged')
     parser.add_argument('--organize', action='store_true',
                         help='Interactively look up loose files in artist folders on '
                              'MusicBrainz, let you pick the correct album, create '
@@ -1737,7 +1744,7 @@ Examples:
         args.directory, args.genre, args.dry_run, args.no_art,
         rename_tracks=args.rename_tracks, strip_comments=args.strip_comments,
         do_tag=args.tag,
-        tag_from_filename=args.tag_from_filename,
+        title_from_filename=args.title_from_filename,
         output_file=args.output, filter_str=args.filter_str,
         skip_tagged=args.skip_tagged, keep_art=args.keep_art,
         confirm=args.confirm, organize=args.organize,
