@@ -859,6 +859,33 @@ def _apply_m4a_tags(filepath, artist, album, year, title, track_num,
     audio.save()
 
 
+def _write_title_tag(filepath: str, title: str, dry_run: bool = False) -> None:
+    """Write only the title tag to an audio file (MP3/FLAC/M4A)."""
+    if dry_run:
+        return
+    ext = Path(filepath).suffix.lower()
+    if ext == '.mp3':
+        try:
+            tags = ID3(filepath)
+        except ID3NoHeaderError:
+            tags = ID3()
+        tags.delall('TIT2')
+        tags.add(TIT2(encoding=3, text=[title]))
+        tags.save(filepath, v2_version=4)
+    elif ext == '.flac':
+        from mutagen.flac import FLAC
+        audio = FLAC(filepath)
+        audio['title'] = title
+        audio.save()
+    elif ext in ('.m4a', '.mp4', '.aac'):
+        from mutagen.mp4 import MP4
+        audio = MP4(filepath)
+        if audio.tags is None:
+            audio.add_tags()
+        audio.tags['\xa9nam'] = [title]
+        audio.save()
+
+
 AUDIO_EXTENSIONS = {'.mp3', '.flac', '.m4a', '.mp4', '.aac'}
 
 
@@ -1158,7 +1185,7 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                   dry_run: bool, skip_art: bool, rename_tracks: bool, strip_comments: bool,
                   log: list, skip_tagged: bool = False, keep_art: bool = False,
                   do_strip_artist: bool = False, rename_folders: bool = False,
-                  do_tag: bool = False) -> int:
+                  do_tag: bool = False, tag_from_filename: bool = False) -> int:
     """Process all audio files in an album directory. Returns count of files processed."""
     folder_name = album_dir.name
     year, album_name = parse_album_folder(folder_name)
@@ -1180,52 +1207,58 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     if do_strip_artist:
         mp3_files = strip_artist_from_files(artist_name, mp3_files, dry_run, log)
 
-    # Look up on MusicBrainz
-    release = search_release(artist_name, album_name, year)
+    # If only --tag-from-filename is set (no MB-dependent flags), skip the online lookup entirely
+    skip_mb_lookup = tag_from_filename and not do_tag and not rename_tracks and not rename_folders
+
+    # Look up on MusicBrainz (skipped when only --tag-from-filename is set)
+    release = None
     track_map = {}
     genre = genre_override
     label = None
     cover_art = None
+    mb_album_name = album_name
 
-    if release:
-        print(f"  MusicBrainz match: {release.get('title', '?')} (id: {release.get('id', '?')[:8]}...)")
-        track_map = build_track_list(release)
+    if not skip_mb_lookup:
+        release = search_release(artist_name, album_name, year)
 
-        # Correct artist name from MusicBrainz canonical spelling
-        canonical_artist = get_canonical_artist_name(release)
-        if canonical_artist and canonical_artist != artist_name:
-            print(f"  Artist correction: '{artist_name}' -> '{canonical_artist}'")
-            artist_name = canonical_artist
+        if release:
+            print(f"  MusicBrainz match: {release.get('title', '?')} (id: {release.get('id', '?')[:8]}...)")
+            track_map = build_track_list(release)
 
-        # Get genre from release group tags
-        if not genre:
-            rg_info = get_release_group_info(release)
-            genre = rg_info.get('genre')
+            # Correct artist name from MusicBrainz canonical spelling
+            canonical_artist = get_canonical_artist_name(release)
+            if canonical_artist and canonical_artist != artist_name:
+                print(f"  Artist correction: '{artist_name}' -> '{canonical_artist}'")
+                artist_name = canonical_artist
 
-        # Get label
-        label_list = release.get('label-info-list', [])
-        if label_list:
-            label = label_list[0].get('label', {}).get('name')
+            # Get genre from release group tags
+            if not genre:
+                rg_info = get_release_group_info(release)
+                genre = rg_info.get('genre')
 
-        # Update year from release if we didn't have one
-        if not year and release.get('date'):
-            year = release['date'][:4]
+            # Get label
+            label_list = release.get('label-info-list', [])
+            if label_list:
+                label = label_list[0].get('label', {}).get('name')
 
-        # Use the MusicBrainz album title, preserving any edition suffix from the
-        # original folder name (e.g. "(Deluxe Edition)") that MB doesn't include.
-        mb_album_name = _preserve_album_suffix(album_name, release.get('title', album_name))
+            # Update year from release if we didn't have one
+            if not year and release.get('date'):
+                year = release['date'][:4]
 
-        # Fetch cover art (only needed when applying tags)
-        if do_tag and not skip_art:
-            print("  Fetching album art...")
-            cover_art = fetch_cover_art(release['id'])
-            if cover_art:
-                print(f"  Got cover art ({len(cover_art) // 1024}KB)")
-            else:
-                print("  No cover art found on Cover Art Archive")
-    else:
-        mb_album_name = album_name
-        print("  WARNING: No MusicBrainz match found — using filename metadata only")
+            # Use the MusicBrainz album title, preserving any edition suffix from the
+            # original folder name (e.g. "(Deluxe Edition)") that MB doesn't include.
+            mb_album_name = _preserve_album_suffix(album_name, release.get('title', album_name))
+
+            # Fetch cover art (only needed when applying tags)
+            if do_tag and not skip_art:
+                print("  Fetching album art...")
+                cover_art = fetch_cover_art(release['id'])
+                if cover_art:
+                    print(f"  Got cover art ({len(cover_art) // 1024}KB)")
+                else:
+                    print("  No cover art found on Cover Art Archive")
+        else:
+            print("  WARNING: No MusicBrainz match found — using filename metadata only")
 
     # Match every file to its MusicBrainz track info ONCE, before any renaming.
     # This single mapping is then used for both renaming and tagging so each
@@ -1328,6 +1361,38 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
         if skipped_tagged:
             print(f"  Skipped {skipped_tagged} already-tagged file(s)")
 
+    # --tag-from-filename always runs last so it overrides any title set by --tag.
+    # In the pure case (no --tag, no rename flags) it also provides the count.
+    if tag_from_filename:
+        for filepath_str, _ in (file_to_track.items() if not skip_mb_lookup else
+                                 ((str(p), None) for p in mp3_files)):
+            mp3_path = Path(filepath_str)
+            _, title = parse_track_filename(mp3_path.name)
+            status = "WOULD TAG" if dry_run else "TAGGED"
+            print(f"  {status} (from filename): {title}")
+            try:
+                _write_title_tag(filepath_str, title, dry_run)
+            except (PermissionError, mutagen.MutagenError) as e:
+                print(f"  ERROR: Could not write title tag '{mp3_path.name}': {e}")
+                continue
+            if skip_mb_lookup:
+                # Pure --tag-from-filename run: log each file and count it
+                log.append({
+                    'type': 'file',
+                    'status': 'would_tag' if dry_run else 'tagged',
+                    'previous_path': filepath_str,
+                    'new_path': filepath_str,
+                    'artist': artist_name,
+                    'album': album_name,
+                    'title': title,
+                    'track': '',
+                    'genre': '',
+                    'year': year or '',
+                    'has_cover': '',
+                    'mb_matched': '',
+                })
+                count += 1
+
     return count
 
 
@@ -1340,7 +1405,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                      strip_artist: bool = False,
                      all_release_types: bool = False,
                      rename_folders: bool = False,
-                     do_tag: bool = False):
+                     do_tag: bool = False,
+                     tag_from_filename: bool = False):
     """Scan the root music directory and process all artist/album folders."""
     root_path = Path(root).resolve()
     if not root_path.is_dir():
@@ -1358,7 +1424,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                          organize_report=None, strip_artist=strip_artist,
                          all_release_types=all_release_types,
                          rename_folders=rename_folders,
-                         do_tag=do_tag)
+                         do_tag=do_tag,
+                         tag_from_filename=tag_from_filename)
         print()
         try:
             answer = input("Apply these changes? [y/N] ").strip().lower()
@@ -1471,7 +1538,8 @@ def scan_and_process(root: str, genre_override: str | None, dry_run: bool, skip_
                                   skip_tagged=skip_tagged, keep_art=keep_art,
                                   do_strip_artist=strip_artist,
                                   rename_folders=rename_folders,
-                                  do_tag=do_tag)
+                                  do_tag=do_tag,
+                                  tag_from_filename=tag_from_filename)
             stats['files'] += count
             total += count
 
@@ -1628,6 +1696,9 @@ Examples:
     parser.add_argument('--tag', action='store_true',
                         help='Write metadata tags to audio files (title, artist, album, '
                              'track number, year, genre, label, cover art)')
+    parser.add_argument('--tag-from-filename', action='store_true',
+                        help='Copy the filename (stripped of leading track number) to the '
+                             'title tag — no online lookup, works on any audio file')
     parser.add_argument('--rename-tracks', action='store_true',
                         help='Rename track files to "NN - Title.ext" format using '
                              'MusicBrainz track numbers (also renames album folders)')
@@ -1666,6 +1737,7 @@ Examples:
         args.directory, args.genre, args.dry_run, args.no_art,
         rename_tracks=args.rename_tracks, strip_comments=args.strip_comments,
         do_tag=args.tag,
+        tag_from_filename=args.tag_from_filename,
         output_file=args.output, filter_str=args.filter_str,
         skip_tagged=args.skip_tagged, keep_art=args.keep_art,
         confirm=args.confirm, organize=args.organize,

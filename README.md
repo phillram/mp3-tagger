@@ -261,6 +261,39 @@ Removes all comment (`COMM`) frames from MP3 ID3 tags. These often contain junk 
 
 ---
 
+### Tag Title from Filename
+
+```bash
+python3 tag_mp3s.py /path/to/music --tag-from-filename
+python3 tag_mp3s.py /path/to/music --tag-from-filename --dry-run
+```
+
+Copies the filename (stripped of its leading track number) to the title tag. No MusicBrainz lookup, no internet connection needed. The number-stripping uses the same logic as the rest of the script:
+
+| Filename | Written title |
+|----------|--------------|
+| `01 - Song Name.mp3` | `Song Name` |
+| `02. Another Song.flac` | `Another Song` |
+| `3 My Track.m4a` | `My Track` |
+| `Just A Title.mp3` | `Just A Title` |
+
+Only the title tag is written — all other tags (artist, album, track number, year, cover art) are left as-is. Works on MP3, FLAC, and M4A/AAC files.
+
+#### Combining with other flags — `--tag-from-filename` always wins
+
+`--tag-from-filename` always runs **last** and always takes precedence over any title set by other flags. This means you can combine it with `--tag` or `--rename-tracks` and the filename will still be what ends up in the title tag:
+
+| Flags | What happens |
+|-------|-------------|
+| `--tag-from-filename` | No MB lookup; title written from filename only |
+| `--tag --tag-from-filename` | Full MB tagging (artist, album, art, etc.), then filename overwrites the title |
+| `--rename-tracks --tag-from-filename` | MB used to get track numbers for renaming; filename used for the title tag |
+| `--tag --rename-tracks --tag-from-filename` | MB tags + renames everything; filename overwrites the title at the end |
+
+This is useful when your filenames are already the authoritative source for track titles but you still want MusicBrainz to fill in everything else (art, year, genre, track numbers, etc.).
+
+---
+
 ### Override Genre
 
 ```bash
@@ -333,6 +366,12 @@ python3 tag_mp3s.py /path/to/music --organize --all-release-types
 # Survey loose files for one artist before organizing
 python3 tag_mp3s.py /path/to/music --organize-report survey.txt --filter "Radiohead"
 
+# Set title tags from filenames only (no internet connection needed)
+python3 tag_mp3s.py /path/to/music --tag-from-filename
+
+# Full MB tagging (art, year, genre, etc.) but keep filename as the title
+python3 tag_mp3s.py /path/to/music --tag --tag-from-filename
+
 # Tag with a genre override and save a change report
 python3 tag_mp3s.py /path/to/music --tag --genre "Electronic" --output report.csv
 
@@ -361,6 +400,7 @@ python3 tag_mp3s.py /path/to/music --tag --keep-art --skip-tagged --output repor
 | `--keep-art` | With `--tag`: only embed art in files that don't already have it |
 | `--strip-artist` | Remove artist name prefix from track filenames |
 | `--strip-comments` | With `--tag`: remove all comment (COMM) frames from MP3 ID3 tags |
+| `--tag-from-filename` | Copy filename (stripped of leading track number) to title tag — always takes precedence over any MB title; no online lookup when used alone |
 | `--output FILE` | Write a CSV report of all changes |
 
 ---
@@ -371,7 +411,7 @@ Each audio file receives the following tags (in the format-appropriate field):
 
 | Tag | MP3 (ID3v2.4) | FLAC (Vorbis) | M4A (MP4) | Source |
 |-----|---------------|---------------|-----------|--------|
-| Song title | `TIT2` | `title` | `©nam` | MusicBrainz recording title, falls back to filename |
+| Song title | `TIT2` | `title` | `©nam` | MusicBrainz recording title, falls back to filename; always overridden by `--tag-from-filename` |
 | Artist | `TPE1` | `artist` | `©ART` | MusicBrainz canonical artist name |
 | Album artist | `TPE2` | `albumartist` | `aART` | MusicBrainz canonical artist name |
 | Album | `TALB` | `album` | `©alb` | MusicBrainz release title |
@@ -395,7 +435,8 @@ Each audio file receives the following tags (in the format-appropriate field):
 7. **Match** — maps each file to its MusicBrainz track info in a single pass, ensuring consistent metadata for both renaming and tagging
 8. **Rename** *(optional)* — renames folders and/or files to canonical format
 9. **Write** — applies tags to each audio file in the appropriate format
-10. **Report** — prints a summary and optionally writes a CSV report
+10. **Title override** *(optional)* — if `--tag-from-filename` is set, overwrites the title tag from the filename as the final step, taking precedence over any MB title written in step 9
+11. **Report** — prints a summary and optionally writes a CSV report
 
 ---
 
