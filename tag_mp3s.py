@@ -887,6 +887,46 @@ def _write_title_tag(filepath: str, title: str, dry_run: bool = False) -> None:
         audio.save()
 
 
+def _strip_comments_tag(filepath: str, dry_run: bool = False) -> bool:
+    """Strip all comment tags from an audio file. Returns True if any comments were found."""
+    ext = Path(filepath).suffix.lower()
+    if ext == '.mp3':
+        try:
+            tags = ID3(filepath)
+        except ID3NoHeaderError:
+            return False
+        comm_frames = tags.getall('COMM')
+        if not comm_frames:
+            return False
+        if not dry_run:
+            tags.delall('COMM')
+            tags.save(filepath, v2_version=4)
+        return True
+    elif ext == '.flac':
+        from mutagen.flac import FLAC
+        audio = FLAC(filepath)
+        found = bool(audio.get('comment') or audio.get('description'))
+        if found and not dry_run:
+            audio.pop('comment', None)
+            audio.pop('description', None)
+            audio.save()
+        return found
+    elif ext in ('.m4a', '.mp4', '.aac'):
+        from mutagen.mp4 import MP4
+        audio = MP4(filepath)
+        if not audio.tags:
+            return False
+        comment_keys = [k for k in audio.tags if k in ('\xa9cmt', 'desc')]
+        if not comment_keys:
+            return False
+        if not dry_run:
+            for k in comment_keys:
+                del audio.tags[k]
+            audio.save()
+        return True
+    return False
+
+
 AUDIO_EXTENSIONS = {'.mp3', '.flac', '.m4a', '.mp4', '.aac'}
 
 
@@ -1199,10 +1239,11 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
     print(f"  Found {len(mp3_files)} audio file(s)")
 
     # If --skip-tagged with --tag, check if ALL files are already fully tagged.
-    # --strip-artist and --title-from-filename always run regardless of --skip-tagged,
-    # so only skip the album early if neither of those is also set.
+    # --strip-artist, --title-from-filename, and --strip-comments always run
+    # regardless of --skip-tagged, so only skip the album early if none of those
+    # is also set.
     if (do_tag and skip_tagged
-            and not do_strip_artist and not title_from_filename
+            and not do_strip_artist and not title_from_filename and not strip_comments
             and all(has_complete_tags(str(f)) for f in mp3_files)):
         print(f"  All files already tagged — skipping album")
         return 0
@@ -1396,6 +1437,22 @@ def process_album(artist_name: str, album_dir: Path, genre_override: str | None,
                     'mb_matched': '',
                 })
                 count += 1
+
+    # --strip-comments always runs last, independently of --tag and --skip-tagged.
+    # When --tag is also set, apply_tags has already stripped comments for non-skipped
+    # files; this pass catches any files that were skipped by --skip-tagged, and also
+    # handles the case where --strip-comments is used without --tag.
+    if strip_comments:
+        for filepath_str in file_to_track:
+            mp3_path = Path(filepath_str)
+            try:
+                found = _strip_comments_tag(filepath_str, dry_run)
+            except (PermissionError, mutagen.MutagenError) as e:
+                print(f"  ERROR: Could not strip comments from '{mp3_path.name}': {e}")
+                continue
+            if found:
+                status = "WOULD STRIP COMMENTS" if dry_run else "STRIPPED COMMENTS"
+                print(f"  {status}: {mp3_path.name}")
 
     return count
 
